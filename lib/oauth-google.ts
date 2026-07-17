@@ -12,6 +12,19 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
 export const GOOGLE_SCOPE = 'openid email https://www.googleapis.com/auth/drive.file'
 
+// The path this module serves the OAuth callback on. The site owner must
+// register the full URL (siteUrl + this path) as an "Authorized redirect URI"
+// on their Google OAuth client, or Google refuses the flow with
+// redirect_uri_mismatch. Defined once so the start route, the callback route,
+// and the settings page that shows the owner what to paste all agree
+// byte-for-byte - a single stray character here is the whole failure mode.
+export const GOOGLE_OAUTH_CALLBACK_PATH =
+  '/api/m/google-sheet-products-for-shop/admin/oauth/google/callback'
+
+export function buildGoogleRedirectUri(siteUrl: string): string {
+  return `${siteUrl.replace(/\/$/, '')}${GOOGLE_OAUTH_CALLBACK_PATH}`
+}
+
 export function buildGoogleAuthUrl(opts: { clientId: string; redirectUri: string; state: string }): string {
   const params = new URLSearchParams({
     client_id: opts.clientId,

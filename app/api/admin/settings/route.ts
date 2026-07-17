@@ -3,7 +3,9 @@ import { z } from 'zod'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
+import { getSiteUrlOrNull } from '@/lib/config/env'
 import { getConnection, saveOAuthClient, setIncludeCostPrice } from '@/modules/google-sheet-products-for-shop/lib/db'
+import { buildGoogleRedirectUri } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
 
 export async function GET() {
   const user = await getSessionFromCookie()
@@ -11,6 +13,7 @@ export async function GET() {
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
 
   const conn = await getConnection()
+  const siteUrl = getSiteUrlOrNull()
 
   // Never return decrypted secrets to the client - only whether they're set.
   return NextResponse.json({
@@ -22,6 +25,11 @@ export async function GET() {
     includeCostPrice: conn?.includeCostPrice ?? true,
     lastPushAt: conn?.lastPushAt ?? null,
     lastPullAt: conn?.lastPullAt ?? null,
+    // The two values the owner must paste into their Google OAuth client. The
+    // redirect URI is the one Google checks byte-for-byte - a mismatch here is
+    // the redirect_uri_mismatch error. Null only if SITE_URL is unset.
+    redirectUri: siteUrl ? buildGoogleRedirectUri(siteUrl) : null,
+    siteOrigin: siteUrl,
   })
 }
 

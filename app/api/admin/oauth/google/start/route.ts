@@ -5,7 +5,7 @@ import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getSiteUrlOrNull } from '@/lib/config/env'
 import { getOAuthClient } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { buildGoogleAuthUrl } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
+import { buildGoogleAuthUrl, buildGoogleRedirectUri } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
 
 export async function GET() {
   const user = await getSessionFromCookie()
@@ -19,7 +19,7 @@ export async function GET() {
   if (!client) return errorResponse('Save your Google app client ID and secret on the settings page first.', 400)
 
   const state = randomBytes(32).toString('hex')
-  const redirectUri = `${siteUrl.replace(/\/$/, '')}/api/m/google-sheet-products-for-shop/admin/oauth/google/callback`
+  const redirectUri = buildGoogleRedirectUri(siteUrl)
 
   const res = NextResponse.json({
     authorizeUrl: buildGoogleAuthUrl({ clientId: client.clientId, redirectUri, state }),

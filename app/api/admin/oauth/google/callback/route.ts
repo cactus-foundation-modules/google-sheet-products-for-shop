@@ -3,7 +3,7 @@ import { getSessionFromCookie } from '@/lib/auth/session'
 import { prisma } from '@/lib/db/prisma'
 import { getSiteUrlOrNull } from '@/lib/config/env'
 import { getOAuthClient, storeTokens } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { exchangeGoogleCode, fetchGoogleAccountEmail } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
+import { buildGoogleRedirectUri, exchangeGoogleCode, fetchGoogleAccountEmail } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
 
 async function settingsRedirect(request: NextRequest, query: string): Promise<NextResponse> {
   const config = await prisma.siteConfig.findUnique({ where: { id: 'singleton' }, select: { adminPath: true } })
@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
   if (!client) return settingsRedirect(request, 'oauth=error&reason=client_missing')
 
   try {
-    const redirectUri = `${siteUrl.replace(/\/$/, '')}/api/m/google-sheet-products-for-shop/admin/oauth/google/callback`
+    const redirectUri = buildGoogleRedirectUri(siteUrl)
     const tokens = await exchangeGoogleCode({ clientId: client.clientId, clientSecret: client.clientSecret, redirectUri, code })
 
     // access_type=offline + prompt=consent should always yield a refresh token
