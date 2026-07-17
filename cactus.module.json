@@ -1,6 +1,6 @@
 {
   "name": "google-sheet-products-for-shop",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "tablePrefix": "gsp_",
   "description": "Mirrors your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.",
   "requiresCoreVersion": "0.5.486",
@@ -15,6 +15,7 @@
       "id": "google-sheet-products-for-shop",
       "label": "Google Sheet",
       "permission": "googlesheets.manage",
+      "host": "shop.settings-sub-tabs",
       "import": "./components/SettingsTab",
       "component": "GoogleSheetSettingsTab"
     }
