@@ -1,23 +1,21 @@
-import { NextResponse } from 'next/server'
-import { after } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { createImportJob, markImportJobStarted, getImportJobById } from '@/modules/shop/lib/db/import-jobs'
-import { processImportJob } from '@/modules/shop/lib/import-engine'
-import { getConnection, stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
+import { createImportJob, markImportJobStarted } from '@/modules/shop/lib/db/import-jobs'
+import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { readGrid } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
-import { gridToImportCsv, missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
-import { applyStatusPass } from '@/modules/google-sheet-products-for-shop/lib/status-pass'
-import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
-import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
-import { pullVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
-import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
+import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
+import { createPullJob, getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
-import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
+import type { PullDetected } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-export async function POST() {
+// Start a Pull. A Pull is now a resumable job the browser drives step by step
+// (see lib/pull-run.ts): this route only reads the sheet, validates it, and
+// creates the job row - the heavy work happens in /pull/step calls. That removes
+// the old 60s-in-one-request ceiling that stranded a big catalogue mid-variations.
+export async function POST(req: NextRequest) {
   const user = await getSessionFromCookie()
   if (!user) return errorResponse('Not authenticated', 401)
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
@@ -25,8 +23,18 @@ export async function POST() {
   const conn = await getConnection()
   if (!conn?.spreadsheetId) return errorResponse('Create the Google Sheet first.', 400)
 
+  // Only one Pull at a time. If an earlier one is paused or failed mid-run, the
+  // owner must Continue or cancel it rather than start a second that races it.
+  const existing = await getLatestUnfinishedPullJob()
+  if (existing) {
+    return NextResponse.json(
+      { error: 'A pull is already in progress. Continue or cancel it first.', pullJobId: existing.id },
+      { status: 409 },
+    )
+  }
+
   // Read both tabs up front so an auth failure or a mangled header is reported
-  // synchronously, before we spawn any background work or touch the database.
+  // synchronously, before we create any job or touch the database.
   let productsGrid: string[][]
   let variationsGrid: string[][]
   try {
@@ -43,70 +51,35 @@ export async function POST() {
     return errorResponse(`Your sheet's Products tab is missing these columns: ${missing.join(', ')}. Fix the header row (or reset the sheet) and try again.`, 400)
   }
 
-  const dataRows = Math.max(productsGrid.length - 1, 0)
-  const lastPushAt = conn.lastPushAt
-  const { id: jobId } = await createImportJob({ filename: 'Google Sheet pull', totalRows: dataRows, createdBy: user.id, columnMap: null })
-  await markImportJobStarted(jobId)
+  const productsTotal = Math.max(productsGrid.length - 1, 0)
+  const variationsTotal = Math.max(variationsGrid.length - 1, 0)
 
-  // Heavy work in the background, same as shop's own import route. The products
-  // import job row is what the admin UI polls; the extra passes finish after it.
-  after(async () => {
-    const runBy = user.id
-    try {
-      // 1. Products (create + update), through shop's own engine. notify:false so
-      // the Pull doesn't fire shop's import-complete email on every run - the sync
-      // log is where a Pull reports its result, not the inbox.
-      await processImportJob(jobId, gridToImportCsv(productsGrid), user.email, null, { notify: false })
-      const job = await getImportJobById(jobId)
+  // The confirm dialog's headline counts, carried through for display only.
+  const body = await req.json().catch(() => ({}))
+  const detected: PullDetected | null =
+    body && typeof body === 'object' && body.detected && typeof body.detected === 'object'
+      ? {
+          productsCreate: Number(body.detected.productsCreate) || 0,
+          productsUpdate: Number(body.detected.productsUpdate) || 0,
+          productsDelete: Number(body.detected.productsDelete) || 0,
+          variationsCreate: Number(body.detected.variationsCreate) || 0,
+          variationsUpdate: Number(body.detected.variationsUpdate) || 0,
+          variationsDelete: Number(body.detected.variationsDelete) || 0,
+        }
+      : null
 
-      // 2. Status pass - the engine ignores the status column; we apply it.
-      const status = await applyStatusPass(productsGrid)
+  // The shop import job carries the products phase and its live per-row progress.
+  const { id: shopImportJobId } = await createImportJob({ filename: 'Google Sheet pull', totalRows: productsTotal, createdBy: user.id, columnMap: null })
+  await markImportJobStarted(shopImportJobId)
 
-      // 3. Plan every deletion once (products + variations), with the push-baseline
-      // anchor. Runs after the import so sheet-created products already count as
-      // present. Nothing is deleted that was not in the sheet as of the last push.
-      const plan = await planPullDeletions(productsGrid, variationsGrid, lastPushAt)
-
-      // 4. Delete products the sheet dropped (cascades their variants).
-      const productDeletions = await applyProductDeletions(plan.products)
-
-      const productErrors: SyncRowError[] = [...(job?.errors ?? []), ...status.errors, ...productDeletions.errors]
-      await writeSyncLog({
-        direction: 'PULL', tab: 'PRODUCTS', status: 'COMPLETED',
-        createdCount: job?.createdCount ?? 0,
-        updatedCount: (job?.updatedCount ?? 0) + status.updated,
-        skippedCount: job?.skippedCount ?? 0,
-        archivedCount: productDeletions.deleted,
-        errors: productErrors, runBy,
-      })
-
-      // 5. Prune the variants the sheet no longer lists FIRST, before the heavy
-      // create/match import below. The prune is a single bulk delete; the import
-      // walks every sheet row and, on a big catalogue, can run right up against the
-      // module dispatcher's time budget. Deleting first means the removal the admin
-      // confirmed always lands even if the import afterwards runs out of time - the
-      // old order left the delete stranded behind the import and it never ran. (A
-      // deleted variation row IS a delete; clearing a parent's whole block removes
-      // all of its variants.)
-      const variationDeletions = await applyVariationDeletions(plan.variations)
-      // 6. Variations create/match - surviving parents now exist, so upsert them.
-      const variations = await pullVariations(variationsGrid)
-      await writeSyncLog({
-        direction: 'PULL', tab: 'VARIATIONS', status: 'COMPLETED',
-        createdCount: variations.created, updatedCount: variations.updated,
-        archivedCount: variationDeletions.deleted,
-        errors: [...variations.errors, ...variationDeletions.errors], runBy,
-      })
-
-      await stampLastPull()
-    } catch (err) {
-      console.error('[google-sheet-products-for-shop/pull] background run failed:', err instanceof Error ? err.message : 'Unknown error')
-      await writeSyncLog({
-        direction: 'PULL', tab: 'PRODUCTS', status: 'FAILED',
-        errors: [{ row: 0, reason: err instanceof Error ? err.message : 'Unknown error' }], runBy,
-      })
-    }
+  const { id: pullJobId } = await createPullJob({
+    productsGrid, variationsGrid,
+    lastPushAt: conn.lastPushAt,
+    shopImportJobId,
+    detected,
+    productsTotal, variationsTotal,
+    runBy: user.id,
   })
 
-  return NextResponse.json({ jobId }, { status: 202 })
+  return NextResponse.json({ pullJobId, productsTotal, variationsTotal }, { status: 202 })
 }

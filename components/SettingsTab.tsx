@@ -15,32 +15,6 @@ type Settings = {
   siteOrigin: string | null
 }
 
-type RowError = { row: number; reason: string }
-type Change = { field: string; from: string; to: string }
-type Preview = {
-  products: {
-    toCreate: Array<{ sku: string | null; name: string }>
-    toUpdate: Array<{ sku: string | null; name: string; changes: Change[] }>
-    toDelete: Array<{ id: string; sku: string | null; name: string }>
-    rowErrors: RowError[]
-  }
-  variations: { toCreate: number; toUpdate: number; toDelete: number; rowErrors: RowError[] }
-  staleness: { changedSinceLastPush: number; since: string | null }
-  headerMissing: string[]
-}
-type SyncLog = {
-  id: string
-  direction: 'PUSH' | 'PULL'
-  tab: 'PRODUCTS' | 'VARIATIONS'
-  status: 'COMPLETED' | 'FAILED'
-  createdCount: number
-  updatedCount: number
-  skippedCount: number
-  archivedCount: number
-  errors: RowError[] | null
-  createdAt: string
-}
-
 const EMPTY: Settings = {
   hasOAuthClient: false,
   hasOAuthConnected: false,
@@ -115,16 +89,10 @@ export function GoogleSheetSettingsTab() {
     if (params.get('oauth') === 'error') return `Google connection failed (${params.get('reason') ?? 'unknown error'}).`
     return null
   })
-  const [preview, setPreview] = useState<Preview | null>(null)
-  const [logs, setLogs] = useState<SyncLog[]>([])
 
   const refresh = useCallback(async () => {
-    const [s, l] = await Promise.all([
-      fetch(`${BASE}/settings`).then((r) => r.json()),
-      fetch(`${BASE}/log`).then((r) => r.json()).catch(() => ({ logs: [] })),
-    ])
+    const s = await fetch(`${BASE}/settings`).then((r) => r.json())
     setSettings({ ...EMPTY, ...s })
-    setLogs(l.logs ?? [])
   }, [])
 
   useEffect(() => {
@@ -189,23 +157,9 @@ export function GoogleSheetSettingsTab() {
     setBusy(null)
     if (res.ok) {
       await refresh()
-      setMessage('Sheet ready.')
+      setMessage('Sheet ready. Push and Pull live on the Products page.')
     } else {
       setMessage((await res.json().catch(() => ({}))).error ?? 'Could not create the sheet.')
-    }
-  }
-
-  async function push() {
-    setBusy('push')
-    setMessage(null)
-    const res = await fetch(`${BASE}/push`, { method: 'POST' })
-    const body = await res.json().catch(() => ({}))
-    setBusy(null)
-    if (res.ok) {
-      setMessage(`Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.`)
-      await refresh()
-    } else {
-      setMessage(body.error ?? 'Push failed.')
     }
   }
 
@@ -218,70 +172,20 @@ export function GoogleSheetSettingsTab() {
     setBusy(null)
     if (res.ok) {
       await refresh()
-      setMessage('Fresh sheet created. Push to fill it.')
+      setMessage('Fresh sheet created. Push (from the Products page) to fill it.')
     } else {
       setMessage(body.error ?? 'Could not reset the sheet.')
     }
   }
 
-  async function loadPreview() {
-    setBusy('preview')
-    setMessage(null)
-    const res = await fetch(`${BASE}/pull/preview`, { method: 'POST' })
-    const body = await res.json().catch(() => ({}))
-    setBusy(null)
-    if (res.ok) {
-      setPreview(body.preview)
-    } else {
-      setMessage(body.error ?? 'Could not read the sheet.')
-    }
-  }
-
-  async function confirmPull() {
-    if (!preview) return
-    setBusy('pull')
-    setMessage(null)
-    const beforeIds = new Set(logs.map((l) => l.id))
-    const res = await fetch(`${BASE}/pull`, { method: 'POST' })
-    if (!res.ok) {
-      setBusy(null)
-      setMessage((await res.json().catch(() => ({}))).error ?? 'Pull failed to start.')
-      return
-    }
-    setPreview(null)
-    setMessage('Pulling… this runs in the background.')
-    // A Pull finishes in two stages: the Products log lands first, then the
-    // Variations log once every variant - its 3D files, image and attributes -
-    // has been written. Wait for the Variations log (or a failure) so "complete"
-    // never shows while variants are still being saved. If neither arrives in the
-    // window, say it's still running rather than claiming success.
-    let settled = false
-    for (let i = 0; i < 90; i++) {
-      await new Promise((r) => setTimeout(r, 2000))
-      const l = await fetch(`${BASE}/log`).then((r) => r.json()).catch(() => ({ logs: [] }))
-      const fresh: SyncLog[] = (l.logs ?? []).filter((x: SyncLog) => x.direction === 'PULL' && !beforeIds.has(x.id))
-      setLogs(l.logs ?? [])
-      const failed = fresh.find((x) => x.status === 'FAILED')
-      const variationsDone = fresh.find((x) => x.tab === 'VARIATIONS' && x.status === 'COMPLETED')
-      if (failed) { setMessage(`Pull failed: ${failed.errors?.[0]?.reason ?? 'unknown error'}`); settled = true; break }
-      if (variationsDone) { setMessage('Pull complete.'); settled = true; break }
-    }
-    if (!settled) setMessage('Pull is still running - check Recent syncs in a moment for the result.')
-    setBusy(null)
-    await refresh()
-  }
-
   if (loading) return null
-
-  const p = preview?.products
-  const deleteCount = (p?.toDelete.length ?? 0) + (preview?.variations.toDelete ?? 0)
 
   return (
     <div>
       <p style={{ ...muted, marginBottom: '1.5rem' }}>
         Mirror your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.
-        Nothing here is live: the sheet only changes when you press Push, and your site only changes when
-        you press Pull - and Pull shows you exactly what it will do first.
+        This tab is the one-off setup; the day-to-day <strong>Push</strong>, <strong>Pull</strong> and sync log
+        live on the <strong>Products</strong> page, under the Google Sheet button.
       </p>
 
       {message && <div className="card" style={{ marginBottom: '1rem' }}>{message}</div>}
@@ -349,7 +253,7 @@ export function GoogleSheetSettingsTab() {
       </form>
 
       {/* --- The sheet --- */}
-      <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="card">
         <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>The sheet</div>
 
         <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 400, marginBottom: '0.5rem' }}>
@@ -370,123 +274,16 @@ export function GoogleSheetSettingsTab() {
         ) : (
           <>
             <p style={{ marginBottom: '0.75rem' }}>
-              <a href={settings.spreadsheetUrl ?? '#'} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>Open the sheet ↗</a>
+              Your sheet is set up. Push, Pull and the sync log are on the{' '}
+              <strong>Products</strong> page - look for the <strong>Google Sheet</strong> button.
             </p>
-            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
-              <button type="button" className="btn btn-primary" onClick={push} disabled={!!busy}>
-                {busy === 'push' ? 'Pushing…' : 'Push to sheet'}
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={loadPreview} disabled={!!busy}>
-                {busy === 'preview' ? 'Reading…' : 'Pull from sheet…'}
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={resetSheet} disabled={!!busy}>
-                {busy === 'reset' ? 'Resetting…' : 'Reset sheet'}
-              </button>
-            </div>
+            <button type="button" className="btn btn-secondary" onClick={resetSheet} disabled={!!busy}>
+              {busy === 'reset' ? 'Resetting…' : 'Reset sheet'}
+            </button>
             <p style={{ ...muted, fontSize: '0.8125rem', marginTop: '0.75rem' }}>
               Last push: {fmt(settings.lastPushAt)} · Last pull: {fmt(settings.lastPullAt)}
             </p>
           </>
-        )}
-      </div>
-
-      {/* --- Pull preview / confirm --- */}
-      {preview && p && (
-        <div className="card" style={{ marginBottom: '1.5rem', borderColor: 'var(--color-primary)' }}>
-          <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Pull preview - nothing has changed yet</div>
-
-          {preview.headerMissing.length > 0 ? (
-            <p style={{ color: 'var(--color-danger)' }}>
-              Your sheet is missing these columns: {preview.headerMissing.join(', ')}. Fix the header row before pulling.
-            </p>
-          ) : (
-            <>
-              {preview.staleness.changedSinceLastPush > 0 && (
-                <p style={{ fontWeight: 600 }}>
-                  {preview.staleness.changedSinceLastPush} product(s) changed in the admin since you last pushed.
-                  Pulling will overwrite those changes.
-                </p>
-              )}
-
-              <ul style={{ margin: '0 0 0.75rem 1rem' }}>
-                <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.toDelete.length ? `, ${p.toDelete.length} to delete` : ''}{p.rowErrors.length ? `, ${p.rowErrors.length} row(s) with errors` : ''}.</li>
-                <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.toDelete ? `, ${preview.variations.toDelete} to remove` : ''}{preview.variations.rowErrors.length ? `, ${preview.variations.rowErrors.length} row(s) with errors` : ''}.</li>
-              </ul>
-
-              {preview.variations.toDelete > 0 && (
-                <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
-                  {preview.variations.toDelete} variation(s) are on your site but no longer in the sheet.
-                  Pulling removes them for good.
-                </p>
-              )}
-
-              {(p.rowErrors.length > 0 || preview.variations.rowErrors.length > 0) && (
-                <details style={{ marginBottom: '0.75rem' }}>
-                  <summary style={{ cursor: 'pointer' }}>Row errors</summary>
-                  <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.5rem 0 0 1rem' }}>
-                    {p.rowErrors.map((e, i) => <li key={`p${i}`}>Products row {e.row}: {e.reason}</li>)}
-                    {preview.variations.rowErrors.map((e, i) => <li key={`v${i}`}>Variations row {e.row}: {e.reason}</li>)}
-                  </ul>
-                </details>
-              )}
-
-              {p.toDelete.length > 0 && (
-                <div style={{ marginBottom: '0.75rem' }}>
-                  <div style={{ fontWeight: 600, color: 'var(--color-danger)' }}>In the shop but not in your sheet</div>
-                  <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
-                    These {p.toDelete.length} product(s) will be permanently deleted on Pull, together with any of
-                    their variations. This cannot be undone. Remove them from this list by putting their rows back
-                    in the sheet.
-                  </p>
-                  <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.25rem 0 0 1rem' }}>
-                    {p.toDelete.map((m) => (
-                      <li key={m.id}>{m.name}{m.sku ? ` (${m.sku})` : ''}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              <div style={{ display: 'flex', gap: '0.75rem' }}>
-                <button type="button" className="btn btn-primary" onClick={confirmPull} disabled={busy === 'pull'}>
-                  {busy === 'pull' ? 'Pulling…' : `Pull${deleteCount ? ` and delete ${deleteCount}` : ''}`}
-                </button>
-                <button type="button" className="btn btn-secondary" onClick={() => setPreview(null)} disabled={busy === 'pull'}>Cancel</button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* --- Recent activity --- */}
-      <div className="card">
-        <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Recent syncs</div>
-        {logs.length === 0 ? (
-          <p style={muted}>No syncs yet.</p>
-        ) : (
-          <table style={{ width: '100%', fontSize: '0.8125rem', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ textAlign: 'left', ...muted }}>
-                <th style={{ padding: '0.25rem 0.5rem 0.25rem 0' }}>When</th>
-                <th>Direction</th>
-                <th>Tab</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {logs.map((l) => (
-                <tr key={l.id} style={{ borderTop: '1px solid var(--color-border)' }}>
-                  <td style={{ padding: '0.25rem 0.5rem 0.25rem 0' }}>{fmt(l.createdAt)}</td>
-                  <td>{l.direction === 'PUSH' ? 'Push' : 'Pull'}</td>
-                  <td>{l.tab === 'PRODUCTS' ? 'Products' : 'Variations'}</td>
-                  <td>
-                    {l.status === 'FAILED'
-                      ? <span style={{ color: 'var(--color-danger)' }}>Failed</span>
-                      : `+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} ${l.tab === 'VARIATIONS' ? 'removed' : 'deleted'}` : ''}${l.errors?.length ? `, ${l.errors.length} error(s)` : ''}`}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         )}
       </div>
     </div>

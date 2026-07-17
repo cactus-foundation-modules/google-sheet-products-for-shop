@@ -34,6 +34,72 @@ export type GspSyncLog = {
   createdAt: Date
 }
 
+// --- Resumable Pull job ----------------------------------------------------
+
+export type PullPhase = 'PRODUCTS' | 'DELETIONS' | 'VARIATIONS' | 'DONE'
+export type PullJobStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+// The confirm dialog's headline counts, stored for display only (so a Continue
+// resumed on a fresh page load can still say what the Pull is about).
+export type PullDetected = {
+  productsCreate: number
+  productsUpdate: number
+  productsDelete: number
+  variationsCreate: number
+  variationsUpdate: number
+  variationsDelete: number
+}
+
+export type PullJob = {
+  id: string
+  status: PullJobStatus
+  phase: PullPhase
+  productsGrid: string[][] | null
+  variationsGrid: string[][] | null
+  lastPushAt: Date | null
+  shopImportJobId: string | null
+  detected: PullDetected | null
+  productsTotal: number
+  variationsTotal: number
+  variationsDone: number
+  prodCreated: number
+  prodUpdated: number
+  prodSkipped: number
+  prodDeleted: number
+  varCreated: number
+  varUpdated: number
+  varDeleted: number
+  prodErrors: SyncRowError[] | null
+  varErrors: SyncRowError[] | null
+  error: string | null
+  runBy: string | null
+  createdAt: Date
+}
+
+// The live snapshot the browser polls while a Pull runs (and on Continue). All
+// the numbers the progress UI needs, without shipping the grids.
+export type PullStatus = {
+  pullJobId: string
+  status: PullJobStatus
+  phase: PullPhase
+  done: boolean
+  productsTotal: number
+  productsDone: number
+  variationsTotal: number
+  variationsDone: number
+  detected: PullDetected | null
+  counts: {
+    productsCreated: number
+    productsUpdated: number
+    productsDeleted: number
+    variationsCreated: number
+    variationsUpdated: number
+    variationsDeleted: number
+  }
+  errorCount: number
+  error: string | null
+}
+
 // What a Pull is about to do, computed without writing anything. The preview
 // runs the same validation the engines apply, so the confirm dialog's counts
 // match what actually happens.

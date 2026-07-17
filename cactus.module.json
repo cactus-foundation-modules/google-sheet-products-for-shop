@@ -1,11 +1,11 @@
 {
   "name": "google-sheet-products-for-shop",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "tablePrefix": "gsp_",
   "description": "Mirrors your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.",
   "requiresCoreVersion": "0.5.486",
   "requiresModules": [
-    { "name": "shop", "minVersion": "0.1.58" },
+    { "name": "shop", "minVersion": "0.1.61" },
     { "name": "shop-variations", "minVersion": "0.1.15" }
   ],
   "permissions": ["googlesheets.manage"],
@@ -20,12 +20,14 @@
       "component": "GoogleSheetSettingsTab"
     }
   ],
-  "extensionPoints": [],
+  "extensionPoints": [
+    { "point": "shop.products-toolbar", "id": "google-sheet-products-toolbar", "permission": "googlesheets.manage", "import": "./components/ProductsToolbar", "component": "GoogleSheetProductsToolbar" }
+  ],
   "requiredEnvVars": [
     { "name": "ENCRYPTION_KEY", "required": true },
     { "name": "SITE_URL", "required": true }
   ],
   "cookieCategories": [],
-  "teardown": ["gsp_connection", "gsp_sync_log"],
+  "teardown": ["gsp_connection", "gsp_sync_log", "gsp_pull_job"],
   "cronJobs": []
 }
