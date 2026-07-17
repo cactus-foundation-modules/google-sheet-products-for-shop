@@ -24,7 +24,7 @@ type Preview = {
     missingFromSheet: Array<{ id: string; sku: string; name: string; status: string }>
     rowErrors: RowError[]
   }
-  variations: { toCreate: number; toUpdate: number; rowErrors: RowError[] }
+  variations: { toCreate: number; toUpdate: number; toDelete: number; rowErrors: RowError[] }
   staleness: { changedSinceLastPush: number; since: string | null }
   headerMissing: string[]
 }
@@ -412,8 +412,15 @@ export function GoogleSheetSettingsTab() {
 
               <ul style={{ margin: '0 0 0.75rem 1rem' }}>
                 <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.rowErrors.length ? `, ${p.rowErrors.length} row(s) with errors` : ''}.</li>
-                <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.rowErrors.length ? `, ${preview.variations.rowErrors.length} row(s) with errors` : ''}.</li>
+                <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.toDelete ? `, ${preview.variations.toDelete} to remove` : ''}{preview.variations.rowErrors.length ? `, ${preview.variations.rowErrors.length} row(s) with errors` : ''}.</li>
               </ul>
+
+              {preview.variations.toDelete > 0 && (
+                <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
+                  {preview.variations.toDelete} variation(s) are on your site but no longer in the sheet.
+                  Pulling removes them for good - unlike products, deleted variations are not archived.
+                </p>
+              )}
 
               {(p.rowErrors.length > 0 || preview.variations.rowErrors.length > 0) && (
                 <details style={{ marginBottom: '0.75rem' }}>
@@ -484,7 +491,7 @@ export function GoogleSheetSettingsTab() {
                   <td>
                     {l.status === 'FAILED'
                       ? <span style={{ color: 'var(--color-danger)' }}>Failed</span>
-                      : `+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} archived` : ''}${l.errors?.length ? `, ${l.errors.length} error(s)` : ''}`}
+                      : `+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} ${l.tab === 'VARIATIONS' ? 'removed' : 'archived'}` : ''}${l.errors?.length ? `, ${l.errors.length} error(s)` : ''}`}
                   </td>
                 </tr>
               ))}

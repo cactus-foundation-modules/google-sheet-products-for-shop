@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db/prisma'
 import { listProducts } from '@/modules/shop/lib/db'
 import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { collectPaged, missingFormatColumns } from '@/modules/shop/lib/csv'
+import { slugify } from '@/modules/shop/lib/slug'
 import { getEditorPayload } from '@/modules/shop-variations/lib/variants-service'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 import type { GspConnection, PullPreview, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
@@ -46,18 +47,19 @@ function computeChanges(existing: ShpProduct, row: string[], header: string[]): 
   return changes
 }
 
-async function predictVariations(grid: string[][]): Promise<{ toCreate: number; toUpdate: number; rowErrors: SyncRowError[] }> {
+async function predictVariations(grid: string[][]): Promise<{ toCreate: number; toUpdate: number; toDelete: number; rowErrors: SyncRowError[] }> {
   const rowErrors: SyncRowError[] = []
   let toCreate = 0
   let toUpdate = 0
-  if (grid.length < 2) return { toCreate, toUpdate, rowErrors }
+  let toDelete = 0
+  if (grid.length < 2) return { toCreate, toUpdate, toDelete, rowErrors }
 
   const header = (grid[0] ?? []).map((h) => h.trim())
   const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
   const slugCol = idx('Parent Slug')
   if (slugCol < 0) {
     rowErrors.push({ row: 1, reason: 'Missing "Parent Slug" column' })
-    return { toCreate, toUpdate, rowErrors }
+    return { toCreate, toUpdate, toDelete, rowErrors }
   }
   const optionPairs: Array<{ nameCol: number; valueCol: number }> = []
   for (let i = 1; ; i++) {
@@ -90,6 +92,9 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     const valueIdByKey = new Map<string, string>()
     for (const o of payload?.options ?? []) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
     const existingSets = new Set((payload?.variants ?? []).map((v) => [...v.optionValueIds].sort().join('|')))
+    // Every combination this parent's rows still want (resolvable ones only) - an
+    // existing variant absent from this set will be pruned on Pull.
+    const wanted = new Set<string>()
 
     for (const gr of rows) {
       const ids: string[] = []
@@ -104,12 +109,16 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
       }
       if (!allResolvable) { toCreate++; continue }
       if (ids.length === 0) { rowErrors.push({ row: gr.rowNum, reason: 'No options on this row' }); continue }
-      if (existingSets.has([...ids].sort().join('|'))) toUpdate++
+      const key = [...ids].sort().join('|')
+      wanted.add(key)
+      if (existingSets.has(key)) toUpdate++
       else toCreate++
     }
+
+    for (const key of existingSets) if (!wanted.has(key)) toDelete++
   }
 
-  return { toCreate, toUpdate, rowErrors }
+  return { toCreate, toUpdate, toDelete, rowErrors }
 }
 
 // The whole Pull, dry-run. Writes nothing.
@@ -128,6 +137,11 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
     return { items: products, total }
   })
   const bySku = new Map(all.filter((p) => p.sku).map((p) => [p.sku as string, p]))
+  // Fallback identity for SKU-less products: their slug (derived from name on
+  // creation). Mirrors the import engine, which now matches the same way - so the
+  // preview's create/update split matches what the Pull actually does instead of
+  // calling every SKU-less product "new".
+  const bySlug = new Map(all.map((p) => [p.slug, p]))
   const sheetSkus = new Set<string>()
 
   const toCreate: PullPreview['products']['toCreate'] = []
@@ -153,7 +167,7 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
       if (!priceRaw || Number.isNaN(Number(priceRaw))) { rowErrors.push({ row: rowNumber, reason: 'Missing or invalid price' }); continue }
       if (statusRaw && !VALID_STATUS.has(statusRaw.toUpperCase())) { rowErrors.push({ row: rowNumber, reason: `Invalid status "${statusRaw}"` }); continue }
 
-      const existing = sku ? bySku.get(sku) : undefined
+      const existing = sku ? bySku.get(sku) : bySlug.get(slugify(name))
       if (existing) toUpdate.push({ sku, name, changes: computeChanges(existing, row, header) })
       else toCreate.push({ sku, name })
     }

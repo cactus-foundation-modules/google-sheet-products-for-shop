@@ -46,7 +46,7 @@ export type PullPreview = {
     missingFromSheet: Array<{ id: string; sku: string; name: string; status: string }>
     rowErrors: SyncRowError[]
   }
-  variations: { toCreate: number; toUpdate: number; rowErrors: SyncRowError[] }
+  variations: { toCreate: number; toUpdate: number; toDelete: number; rowErrors: SyncRowError[] }
   staleness: { changedSinceLastPush: number; since: string | null }
   // Required Products columns the sheet header is missing (Pull will refuse).
   headerMissing: string[]

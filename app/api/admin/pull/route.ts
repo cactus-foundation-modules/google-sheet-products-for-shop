@@ -13,6 +13,7 @@ import { gridToImportCsv, missingProductsColumns, extractSheetSkus } from '@/mod
 import { applyStatusPass } from '@/modules/google-sheet-products-for-shop/lib/status-pass'
 import { applyArchivePass } from '@/modules/google-sheet-products-for-shop/lib/archive-pass'
 import { pullVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
+import { reconcileVariations } from '@/modules/google-sheet-products-for-shop/lib/reconcile-variations'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
@@ -81,10 +82,15 @@ export async function POST(request: NextRequest) {
 
       // 4. Variations - parents now exist, so this can create/match them.
       const variations = await pullVariations(variationsGrid)
+      // 5. Prune variants a parent still in the sheet no longer lists (a deleted
+      // row IS a delete for variations). archivedCount doubles as the removed
+      // count on the Variations log row.
+      const prune = await reconcileVariations(variationsGrid)
       await writeSyncLog({
         direction: 'PULL', tab: 'VARIATIONS', status: 'COMPLETED',
         createdCount: variations.created, updatedCount: variations.updated,
-        errors: variations.errors, runBy,
+        archivedCount: prune.deleted,
+        errors: [...variations.errors, ...prune.errors], runBy,
       })
 
       await stampLastPull()
