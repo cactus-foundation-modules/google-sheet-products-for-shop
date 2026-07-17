@@ -78,11 +78,17 @@ export async function POST() {
         errors: productErrors, runBy,
       })
 
-      // 5. Variations - surviving parents now exist, so create/match them.
-      const variations = await pullVariations(variationsGrid)
-      // 6. Prune the variants the sheet no longer lists (a deleted variation row
-      // IS a delete; clearing a parent's whole block removes all of its variants).
+      // 5. Prune the variants the sheet no longer lists FIRST, before the heavy
+      // create/match import below. The prune is a single bulk delete; the import
+      // walks every sheet row and, on a big catalogue, can run right up against the
+      // module dispatcher's time budget. Deleting first means the removal the admin
+      // confirmed always lands even if the import afterwards runs out of time - the
+      // old order left the delete stranded behind the import and it never ran. (A
+      // deleted variation row IS a delete; clearing a parent's whole block removes
+      // all of its variants.)
       const variationDeletions = await applyVariationDeletions(plan.variations)
+      // 6. Variations create/match - surviving parents now exist, so upsert them.
+      const variations = await pullVariations(variationsGrid)
       await writeSyncLog({
         direction: 'PULL', tab: 'VARIATIONS', status: 'COMPLETED',
         createdCount: variations.created, updatedCount: variations.updated,
