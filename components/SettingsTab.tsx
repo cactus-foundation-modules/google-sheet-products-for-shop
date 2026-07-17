@@ -250,19 +250,23 @@ export function GoogleSheetSettingsTab() {
     }
     setPreview(null)
     setMessage('Pulling… this runs in the background.')
-    // Poll the sync log until a fresh PULL entry lands (the pull writes its
-    // result rows when the background run finishes).
-    for (let i = 0; i < 60; i++) {
+    // A Pull finishes in two stages: the Products log lands first, then the
+    // Variations log once every variant - its 3D files, image and attributes -
+    // has been written. Wait for the Variations log (or a failure) so "complete"
+    // never shows while variants are still being saved. If neither arrives in the
+    // window, say it's still running rather than claiming success.
+    let settled = false
+    for (let i = 0; i < 90; i++) {
       await new Promise((r) => setTimeout(r, 2000))
       const l = await fetch(`${BASE}/log`).then((r) => r.json()).catch(() => ({ logs: [] }))
       const fresh: SyncLog[] = (l.logs ?? []).filter((x: SyncLog) => x.direction === 'PULL' && !beforeIds.has(x.id))
       setLogs(l.logs ?? [])
-      if (fresh.length) {
-        const failed = fresh.find((x) => x.status === 'FAILED')
-        setMessage(failed ? `Pull failed: ${failed.errors?.[0]?.reason ?? 'unknown error'}` : 'Pull complete.')
-        break
-      }
+      const failed = fresh.find((x) => x.status === 'FAILED')
+      const variationsDone = fresh.find((x) => x.tab === 'VARIATIONS' && x.status === 'COMPLETED')
+      if (failed) { setMessage(`Pull failed: ${failed.errors?.[0]?.reason ?? 'unknown error'}`); settled = true; break }
+      if (variationsDone) { setMessage('Pull complete.'); settled = true; break }
     }
+    if (!settled) setMessage('Pull is still running - check Recent syncs in a moment for the result.')
     setBusy(null)
     await refresh()
   }

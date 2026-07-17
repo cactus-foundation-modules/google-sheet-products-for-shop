@@ -53,8 +53,10 @@ export async function POST() {
   after(async () => {
     const runBy = user.id
     try {
-      // 1. Products (create + update), through shop's own engine unchanged.
-      await processImportJob(jobId, gridToImportCsv(productsGrid), user.email, null)
+      // 1. Products (create + update), through shop's own engine. notify:false so
+      // the Pull doesn't fire shop's import-complete email on every run - the sync
+      // log is where a Pull reports its result, not the inbox.
+      await processImportJob(jobId, gridToImportCsv(productsGrid), user.email, null, { notify: false })
       const job = await getImportJobById(jobId)
 
       // 2. Status pass - the engine ignores the status column; we apply it.
