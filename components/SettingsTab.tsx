@@ -21,7 +21,7 @@ type Preview = {
   products: {
     toCreate: Array<{ sku: string | null; name: string }>
     toUpdate: Array<{ sku: string | null; name: string; changes: Change[] }>
-    missingFromSheet: Array<{ id: string; sku: string; name: string; status: string }>
+    toDelete: Array<{ id: string; sku: string | null; name: string }>
     rowErrors: RowError[]
   }
   variations: { toCreate: number; toUpdate: number; toDelete: number; rowErrors: RowError[] }
@@ -116,7 +116,6 @@ export function GoogleSheetSettingsTab() {
     return null
   })
   const [preview, setPreview] = useState<Preview | null>(null)
-  const [archive, setArchive] = useState<Set<string>>(new Set())
   const [logs, setLogs] = useState<SyncLog[]>([])
 
   const refresh = useCallback(async () => {
@@ -233,7 +232,6 @@ export function GoogleSheetSettingsTab() {
     setBusy(null)
     if (res.ok) {
       setPreview(body.preview)
-      setArchive(new Set())
     } else {
       setMessage(body.error ?? 'Could not read the sheet.')
     }
@@ -244,11 +242,7 @@ export function GoogleSheetSettingsTab() {
     setBusy('pull')
     setMessage(null)
     const beforeIds = new Set(logs.map((l) => l.id))
-    const res = await fetch(`${BASE}/pull`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ archiveSkus: [...archive] }),
-    })
+    const res = await fetch(`${BASE}/pull`, { method: 'POST' })
     if (!res.ok) {
       setBusy(null)
       setMessage((await res.json().catch(() => ({}))).error ?? 'Pull failed to start.')
@@ -276,7 +270,7 @@ export function GoogleSheetSettingsTab() {
   if (loading) return null
 
   const p = preview?.products
-  const canArchive = (p?.missingFromSheet.length ?? 0) > 0
+  const deleteCount = (p?.toDelete.length ?? 0) + (preview?.variations.toDelete ?? 0)
 
   return (
     <div>
@@ -411,14 +405,14 @@ export function GoogleSheetSettingsTab() {
               )}
 
               <ul style={{ margin: '0 0 0.75rem 1rem' }}>
-                <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.rowErrors.length ? `, ${p.rowErrors.length} row(s) with errors` : ''}.</li>
+                <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.toDelete.length ? `, ${p.toDelete.length} to delete` : ''}{p.rowErrors.length ? `, ${p.rowErrors.length} row(s) with errors` : ''}.</li>
                 <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.toDelete ? `, ${preview.variations.toDelete} to remove` : ''}{preview.variations.rowErrors.length ? `, ${preview.variations.rowErrors.length} row(s) with errors` : ''}.</li>
               </ul>
 
               {preview.variations.toDelete > 0 && (
                 <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
                   {preview.variations.toDelete} variation(s) are on your site but no longer in the sheet.
-                  Pulling removes them for good - unlike products, deleted variations are not archived.
+                  Pulling removes them for good.
                 </p>
               )}
 
@@ -432,33 +426,25 @@ export function GoogleSheetSettingsTab() {
                 </details>
               )}
 
-              {canArchive && (
+              {p.toDelete.length > 0 && (
                 <div style={{ marginBottom: '0.75rem' }}>
-                  <div style={{ fontWeight: 600 }}>In the shop but not in your sheet</div>
-                  <p style={{ ...muted, fontSize: '0.8125rem' }}>
-                    These are left alone by default. Tick any you want to archive (reversible - never deleted).
+                  <div style={{ fontWeight: 600, color: 'var(--color-danger)' }}>In the shop but not in your sheet</div>
+                  <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
+                    These {p.toDelete.length} product(s) will be permanently deleted on Pull, together with any of
+                    their variations. This cannot be undone. Remove them from this list by putting their rows back
+                    in the sheet.
                   </p>
-                  {p.missingFromSheet.map((m) => (
-                    <label key={m.id} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 400 }}>
-                      <input
-                        type="checkbox"
-                        checked={archive.has(m.sku)}
-                        onChange={(e) => setArchive((prev) => {
-                          const next = new Set(prev)
-                          if (e.target.checked) next.add(m.sku)
-                          else next.delete(m.sku)
-                          return next
-                        })}
-                      />
-                      {m.name} <span style={muted}>({m.sku})</span>
-                    </label>
-                  ))}
+                  <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.25rem 0 0 1rem' }}>
+                    {p.toDelete.map((m) => (
+                      <li key={m.id}>{m.name}{m.sku ? ` (${m.sku})` : ''}</li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
               <div style={{ display: 'flex', gap: '0.75rem' }}>
                 <button type="button" className="btn btn-primary" onClick={confirmPull} disabled={busy === 'pull'}>
-                  {busy === 'pull' ? 'Pulling…' : `Pull${archive.size ? ` and archive ${archive.size}` : ''}`}
+                  {busy === 'pull' ? 'Pulling…' : `Pull${deleteCount ? ` and delete ${deleteCount}` : ''}`}
                 </button>
                 <button type="button" className="btn btn-secondary" onClick={() => setPreview(null)} disabled={busy === 'pull'}>Cancel</button>
               </div>
@@ -491,7 +477,7 @@ export function GoogleSheetSettingsTab() {
                   <td>
                     {l.status === 'FAILED'
                       ? <span style={{ color: 'var(--color-danger)' }}>Failed</span>
-                      : `+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} ${l.tab === 'VARIATIONS' ? 'removed' : 'archived'}` : ''}${l.errors?.length ? `, ${l.errors.length} error(s)` : ''}`}
+                      : `+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} ${l.tab === 'VARIATIONS' ? 'removed' : 'deleted'}` : ''}${l.errors?.length ? `, ${l.errors.length} error(s)` : ''}`}
                   </td>
                 </tr>
               ))}

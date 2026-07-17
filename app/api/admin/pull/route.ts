@@ -1,6 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
 import { after } from 'next/server'
-import { z } from 'zod'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
@@ -9,28 +8,22 @@ import { processImportJob } from '@/modules/shop/lib/import-engine'
 import { getConnection, stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { readGrid } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
-import { gridToImportCsv, missingProductsColumns, extractSheetSkus } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
+import { gridToImportCsv, missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { applyStatusPass } from '@/modules/google-sheet-products-for-shop/lib/status-pass'
-import { applyArchivePass } from '@/modules/google-sheet-products-for-shop/lib/archive-pass'
+import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
+import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
 import { pullVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
-import { reconcileVariations } from '@/modules/google-sheet-products-for-shop/lib/reconcile-variations'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-const Body = z.object({ archiveSkus: z.array(z.string()).optional() })
-
-export async function POST(request: NextRequest) {
+export async function POST() {
   const user = await getSessionFromCookie()
   if (!user) return errorResponse('Not authenticated', 401)
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
 
   const conn = await getConnection()
   if (!conn?.spreadsheetId) return errorResponse('Create the Google Sheet first.', 400)
-
-  const parsed = Body.safeParse(await request.json().catch(() => ({})))
-  if (!parsed.success) return errorResponse('Invalid input')
-  const archiveSkus = parsed.data.archiveSkus ?? []
 
   // Read both tabs up front so an auth failure or a mangled header is reported
   // synchronously, before we spawn any background work or touch the database.
@@ -51,6 +44,7 @@ export async function POST(request: NextRequest) {
   }
 
   const dataRows = Math.max(productsGrid.length - 1, 0)
+  const lastPushAt = conn.lastPushAt
   const { id: jobId } = await createImportJob({ filename: 'Google Sheet pull', totalRows: dataRows, createdBy: user.id, columnMap: null })
   await markImportJobStarted(jobId)
 
@@ -66,31 +60,34 @@ export async function POST(request: NextRequest) {
       // 2. Status pass - the engine ignores the status column; we apply it.
       const status = await applyStatusPass(productsGrid)
 
-      // 3. Archive pass - only the skus the admin explicitly ticked.
-      const sheetSkus = extractSheetSkus(productsGrid)
-      const archive = await applyArchivePass({ archiveSkus, sheetSkus })
+      // 3. Plan every deletion once (products + variations), with the push-baseline
+      // anchor. Runs after the import so sheet-created products already count as
+      // present. Nothing is deleted that was not in the sheet as of the last push.
+      const plan = await planPullDeletions(productsGrid, variationsGrid, lastPushAt)
 
-      const productErrors: SyncRowError[] = [...(job?.errors ?? []), ...status.errors, ...archive.errors]
+      // 4. Delete products the sheet dropped (cascades their variants).
+      const productDeletions = await applyProductDeletions(plan.products)
+
+      const productErrors: SyncRowError[] = [...(job?.errors ?? []), ...status.errors, ...productDeletions.errors]
       await writeSyncLog({
         direction: 'PULL', tab: 'PRODUCTS', status: 'COMPLETED',
         createdCount: job?.createdCount ?? 0,
         updatedCount: (job?.updatedCount ?? 0) + status.updated,
         skippedCount: job?.skippedCount ?? 0,
-        archivedCount: archive.archived,
+        archivedCount: productDeletions.deleted,
         errors: productErrors, runBy,
       })
 
-      // 4. Variations - parents now exist, so this can create/match them.
+      // 5. Variations - surviving parents now exist, so create/match them.
       const variations = await pullVariations(variationsGrid)
-      // 5. Prune variants a parent still in the sheet no longer lists (a deleted
-      // row IS a delete for variations). archivedCount doubles as the removed
-      // count on the Variations log row.
-      const prune = await reconcileVariations(variationsGrid)
+      // 6. Prune the variants the sheet no longer lists (a deleted variation row
+      // IS a delete; clearing a parent's whole block removes all of its variants).
+      const variationDeletions = await applyVariationDeletions(plan.variations)
       await writeSyncLog({
         direction: 'PULL', tab: 'VARIATIONS', status: 'COMPLETED',
         createdCount: variations.created, updatedCount: variations.updated,
-        archivedCount: prune.deleted,
-        errors: [...variations.errors, ...prune.errors], runBy,
+        archivedCount: variationDeletions.deleted,
+        errors: [...variations.errors, ...variationDeletions.errors], runBy,
       })
 
       await stampLastPull()

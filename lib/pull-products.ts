@@ -19,18 +19,3 @@ function escapeCell(value: string): string {
 export function gridToImportCsv(grid: string[][]): string {
   return grid.map((row) => row.map(escapeCell).join(',')).join('\r\n')
 }
-
-// Every non-empty sku present in the Products grid. Used to work out which shop
-// products are absent from the sheet (archive candidates) and to refuse
-// archiving a sku that is in fact still on the sheet.
-export function extractSheetSkus(grid: string[][]): Set<string> {
-  const header = (grid[0] ?? []).map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'))
-  const skuCol = header.indexOf('sku')
-  const skus = new Set<string>()
-  if (skuCol < 0) return skus
-  for (let r = 1; r < grid.length; r++) {
-    const sku = (grid[r]?.[skuCol] ?? '').trim()
-    if (sku) skus.add(sku)
-  }
-  return skus
-}

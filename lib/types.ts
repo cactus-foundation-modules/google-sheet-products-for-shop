@@ -41,9 +41,9 @@ export type PullPreview = {
   products: {
     toCreate: Array<{ sku: string | null; name: string }>
     toUpdate: Array<{ sku: string | null; name: string; changes: Array<{ field: string; from: string; to: string }> }>
-    // Archive candidates: in the shop (non-hidden, not already archived) but not
-    // in the sheet. Default action is nothing; the admin ticks any to archive.
-    missingFromSheet: Array<{ id: string; sku: string; name: string; status: string }>
+    // In the shop (non-hidden) but not in the sheet, and present as of the last
+    // push. Pull deletes these outright, along with any variants they carry.
+    toDelete: Array<{ id: string; sku: string | null; name: string }>
     rowErrors: SyncRowError[]
   }
   variations: { toCreate: number; toUpdate: number; toDelete: number; rowErrors: SyncRowError[] }

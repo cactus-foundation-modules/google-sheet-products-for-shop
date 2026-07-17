@@ -4,6 +4,7 @@ import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { collectPaged, missingFormatColumns } from '@/modules/shop/lib/csv'
 import { slugify } from '@/modules/shop/lib/slug'
 import { getEditorPayload } from '@/modules/shop-variations/lib/variants-service'
+import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 import type { GspConnection, PullPreview, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
@@ -47,19 +48,21 @@ function computeChanges(existing: ShpProduct, row: string[], header: string[]): 
   return changes
 }
 
-async function predictVariations(grid: string[][]): Promise<{ toCreate: number; toUpdate: number; toDelete: number; rowErrors: SyncRowError[] }> {
+// Create/update counts only. Deletions (partial + emptied parents, with the
+// push-baseline anchor) come from planPullDeletions, the same planner the Pull
+// runs, so the preview's "to remove" count matches exactly what happens.
+async function predictVariations(grid: string[][]): Promise<{ toCreate: number; toUpdate: number; rowErrors: SyncRowError[] }> {
   const rowErrors: SyncRowError[] = []
   let toCreate = 0
   let toUpdate = 0
-  let toDelete = 0
-  if (grid.length < 2) return { toCreate, toUpdate, toDelete, rowErrors }
+  if (grid.length < 2) return { toCreate, toUpdate, rowErrors }
 
   const header = (grid[0] ?? []).map((h) => h.trim())
   const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
   const slugCol = idx('Parent Slug')
   if (slugCol < 0) {
     rowErrors.push({ row: 1, reason: 'Missing "Parent Slug" column' })
-    return { toCreate, toUpdate, toDelete, rowErrors }
+    return { toCreate, toUpdate, rowErrors }
   }
   const optionPairs: Array<{ nameCol: number; valueCol: number }> = []
   for (let i = 1; ; i++) {
@@ -92,9 +95,6 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     const valueIdByKey = new Map<string, string>()
     for (const o of payload?.options ?? []) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
     const existingSets = new Set((payload?.variants ?? []).map((v) => [...v.optionValueIds].sort().join('|')))
-    // Every combination this parent's rows still want (resolvable ones only) - an
-    // existing variant absent from this set will be pruned on Pull.
-    const wanted = new Set<string>()
 
     for (const gr of rows) {
       const ids: string[] = []
@@ -110,15 +110,12 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
       if (!allResolvable) { toCreate++; continue }
       if (ids.length === 0) { rowErrors.push({ row: gr.rowNum, reason: 'No options on this row' }); continue }
       const key = [...ids].sort().join('|')
-      wanted.add(key)
       if (existingSets.has(key)) toUpdate++
       else toCreate++
     }
-
-    for (const key of existingSets) if (!wanted.has(key)) toDelete++
   }
 
-  return { toCreate, toUpdate, toDelete, rowErrors }
+  return { toCreate, toUpdate, rowErrors }
 }
 
 // The whole Pull, dry-run. Writes nothing.
@@ -142,7 +139,6 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
   // preview's create/update split matches what the Pull actually does instead of
   // calling every SKU-less product "new".
   const bySlug = new Map(all.map((p) => [p.slug, p]))
-  const sheetSkus = new Set<string>()
 
   const toCreate: PullPreview['products']['toCreate'] = []
   const toUpdate: PullPreview['products']['toUpdate'] = []
@@ -160,7 +156,6 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
       const priceRaw = at(priceCol)
       const statusRaw = at(statusCol)
       const sku = at(skuCol) || null
-      if (sku) sheetSkus.add(sku)
 
       if (!name) { rowErrors.push({ row: rowNumber, reason: 'Missing name' }); continue }
       if (!VALID_TYPE.has(type)) { rowErrors.push({ row: rowNumber, reason: `Invalid type "${at(typeCol)}"` }); continue }
@@ -173,9 +168,13 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
     }
   }
 
-  const missingFromSheet = all
-    .filter((p) => p.sku && !sheetSkus.has(p.sku) && p.status !== 'ARCHIVED')
-    .map((p) => ({ id: p.id, sku: p.sku as string, name: p.name, status: p.status }))
+  // Deletions (products + variations) come from the shared planner so the preview
+  // shows exactly what the Pull will remove - reusing `all` to save a refetch. A
+  // mangled header means we can't read the sheet's identity columns, so we plan no
+  // deletions (and the Pull itself refuses outright until the header is fixed).
+  const plan = headerMissing.length === 0
+    ? await planPullDeletions(productsGrid, variationsGrid, conn.lastPushAt, all)
+    : { products: [], variations: [] }
 
   let staleness: PullPreview['staleness'] = { changedSinceLastPush: 0, since: null }
   if (conn.lastPushAt) {
@@ -186,7 +185,13 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
     staleness = { changedSinceLastPush: Number(rows[0]?.count ?? 0), since: conn.lastPushAt.toISOString() }
   }
 
-  const variations = await predictVariations(variationsGrid)
+  const variationsPred = await predictVariations(variationsGrid)
+  const variations = {
+    toCreate: variationsPred.toCreate,
+    toUpdate: variationsPred.toUpdate,
+    toDelete: plan.variations.length,
+    rowErrors: variationsPred.rowErrors,
+  }
 
-  return { products: { toCreate, toUpdate, missingFromSheet, rowErrors }, variations, staleness, headerMissing }
+  return { products: { toCreate, toUpdate, toDelete: plan.products, rowErrors }, variations, staleness, headerMissing }
 }
