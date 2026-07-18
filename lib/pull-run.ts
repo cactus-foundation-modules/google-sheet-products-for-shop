@@ -10,11 +10,18 @@ import { stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getPullJob, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-// How many variation rows one /pull/step processes. Small enough that a single
-// batch - even with a media re-file per row - finishes well inside the module
-// dispatcher's 60s ceiling, so no batch can ever get stuck the way the old
-// all-in-one-request Pull did on a big catalogue.
-const VAR_ROW_BATCH = 60
+// How many variation rows land in one database write. Kept small so the cursor
+// advances often: even if the request is killed mid-step, everything up to the
+// last finished chunk is saved and Continue picks up from there rather than
+// re-running (and re-timing-out on) one big batch - which is exactly how a
+// 60-row batch that could not finish inside the dispatcher's 60s ceiling left
+// a Pull wedged at "0 of 83" forever.
+const VAR_ROW_CHUNK = 10
+
+// How long one /pull/step keeps starting new chunks. Well under the module
+// dispatcher's 60s ceiling so the slowest single chunk still finishes and gets
+// its cursor write in before the platform kills the request.
+const STEP_TIME_BUDGET_MS = 35_000
 
 // Live products progress comes from the shop import job's own processed_rows,
 // which processImportJob updates every 25 rows as it runs. Once the products
@@ -113,29 +120,37 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
       if (!job.variationsGrid) throw new Error('Pull job is missing its variations snapshot.')
       const header = job.variationsGrid[0] ?? []
       const dataRows = job.variationsGrid.slice(1)
-      const start = job.variationsDone
-      const batch = dataRows.slice(start, start + VAR_ROW_BATCH)
-      if (batch.length === 0) {
-        await finalizePullJob(job)
-      } else {
+      const stepStartedAt = Date.now()
+      // Chunks keep going until the time budget is spent, the cursor written after
+      // every one - so however slow the rows are, each step banks real progress and
+      // the next Continue (or the browser's own loop) resumes from the last chunk,
+      // never from the start of a batch it already half-did.
+      let cursor = job.variationsDone
+      let created = job.varCreated
+      let updated = job.varUpdated
+      let errors = job.varErrors ?? []
+      while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+        const chunk = dataRows.slice(cursor, cursor + VAR_ROW_CHUNK)
         // The importer re-derives options/variants from the DB per call, so feeding
         // it header + a slice of rows is correct even when a parent's rows straddle
-        // two batches: the second batch finds what the first created.
-        const res = await importVariationsCsv(gridToImportCsv([header, ...batch]))
-        const newDone = start + batch.length
-        const finished = newDone >= dataRows.length
+        // two chunks: the second chunk finds what the first created.
+        const res = await importVariationsCsv(gridToImportCsv([header, ...chunk]))
+        cursor += chunk.length
+        created += res.created
+        updated += res.updated
+        errors = [...errors, ...res.errors]
         await updatePullJob(jobId, {
           status: 'RUNNING', error: null,
-          variationsDone: newDone,
-          varCreated: job.varCreated + res.created,
-          varUpdated: job.varUpdated + res.updated,
-          varErrors: [...(job.varErrors ?? []), ...res.errors],
-          ...(finished ? { phase: 'DONE' } : {}),
+          variationsDone: cursor,
+          varCreated: created,
+          varUpdated: updated,
+          varErrors: errors,
+          ...(cursor >= dataRows.length ? { phase: 'DONE' } : {}),
         })
-        if (finished) {
-          const reloaded = await getPullJob(jobId)
-          if (reloaded) await finalizePullJob(reloaded)
-        }
+      }
+      if (cursor >= dataRows.length) {
+        const reloaded = await getPullJob(jobId)
+        if (reloaded) await finalizePullJob(reloaded)
       }
     } else {
       // phase DONE but not COMPLETED - a finalize that crashed mid-write. Redo it.
