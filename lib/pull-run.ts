@@ -10,13 +10,15 @@ import { stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getPullJob, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-// How many variation rows land in one database write. Kept small so the cursor
-// advances often: even if the request is killed mid-step, everything up to the
-// last finished chunk is saved and Continue picks up from there rather than
-// re-running (and re-timing-out on) one big batch - which is exactly how a
-// 60-row batch that could not finish inside the dispatcher's 60s ceiling left
-// a Pull wedged at "0 of 83" forever.
-const VAR_ROW_CHUNK = 10
+// How many variation rows land in one importer call. Each call carries a fixed
+// per-parent cost (load the parent, its variants, their fields, its options and
+// images once), so a bigger chunk amortises that over more rows. It stayed at 10
+// only because every row used to re-read its child to check for changes; now that
+// the importer diffs a pre-loaded field map in memory and flushes its writes
+// together, 25 rows finish comfortably inside the dispatcher's 60s ceiling. The
+// cursor still advances after every chunk, so a killed step re-does at most one
+// chunk of idempotent no-ops - never the whole batch that once wedged a Pull.
+const VAR_ROW_CHUNK = 25
 
 // How long one /pull/step keeps starting new chunks. Well under the module
 // dispatcher's 60s ceiling so the slowest single chunk still finishes and gets
