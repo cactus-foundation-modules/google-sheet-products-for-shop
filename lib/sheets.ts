@@ -67,8 +67,14 @@ export async function createSpreadsheet(title: string, tabTitles: string[]): Pro
   return { spreadsheetId: data.spreadsheetId, spreadsheetUrl: data.spreadsheetUrl, sheetIds }
 }
 
+// What a single cell may hold on the way in. Numbers and booleans are sent as
+// JSON numbers/booleans so Sheets stores them as numbers and booleans: a numeric
+// string under valueInputOption=RAW lands as text, which Sheets displays as
+// '100 and will not sum, sort or chart.
+export type CellValue = string | number | boolean
+
 // values.update, RAW - no cell is ever evaluated as a formula.
-export async function writeGrid(spreadsheetId: string, tab: string, values: string[][]): Promise<void> {
+export async function writeGrid(spreadsheetId: string, tab: string, values: CellValue[][]): Promise<void> {
   await ok(
     await googleFetch(`${SHEETS_API}/${spreadsheetId}/values/${tabRange(tab, 'A1')}?valueInputOption=RAW`, {
       method: 'PUT',

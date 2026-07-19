@@ -17,12 +17,18 @@ export type VariantDeletion = { childProductId: string; parentSlug: string; labe
 export type PullDeletionPlan = { products: ProductDeletion[]; variations: VariantDeletion[] }
 
 // Sheet product-row identity: a shop product counts as "still in the sheet" if
-// its SKU matches a row's SKU, or its slug matches slugify(a row's name) - the
-// same two ways the import engine matches a row back to an existing product.
+// its SKU matches a row's SKU, or its slug matches a row's slug - the same two
+// ways the import engine matches a row back to an existing product.
+//
+// Both the row's own slug cell and slugify(its name) count. The slug column is
+// the identity the importer prefers, but a row whose name was edited without its
+// slug (or a sheet from before the slug column existed) must still be recognised
+// - anything unrecognised here is a product this Pull would DELETE.
 export function sheetProductIdentity(grid: string[][]): { skus: Set<string>; slugs: Set<string> } {
   const header = (grid[0] ?? []).map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'))
   const skuCol = header.indexOf('sku')
   const nameCol = header.indexOf('name')
+  const slugCol = header.indexOf('slug')
   const skus = new Set<string>()
   const slugs = new Set<string>()
   for (let r = 1; r < grid.length; r++) {
@@ -31,6 +37,8 @@ export function sheetProductIdentity(grid: string[][]): { skus: Set<string>; slu
     if (sku) skus.add(sku)
     const name = nameCol >= 0 ? (row[nameCol] ?? '').trim() : ''
     if (name) slugs.add(slugify(name))
+    const slug = slugCol >= 0 ? (row[slugCol] ?? '').trim() : ''
+    if (slug) slugs.add(slugify(slug))
   }
   return { skus, slugs }
 }

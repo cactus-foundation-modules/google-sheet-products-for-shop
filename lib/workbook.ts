@@ -24,6 +24,11 @@ function readmeRows(): string[][] {
     ['- The Products tab is always synced before the Variations tab, in both directions.'],
     ['- A variant\'s "Parent Slug" must already exist as a product, or its rows are skipped.'],
     [''],
+    ['THE SLUG COLUMN'],
+    ['- "slug" is the last part of a product\'s web address. Change it and Pull, and the product moves to the new address.'],
+    ['- Leave it alone if you are unsure: anyone linking to the old address will land on nothing.'],
+    ['- A row with no SKU is matched to your site by its slug, so blanking that column on an existing product creates a duplicate.'],
+    [''],
     ['WHAT IS AND ISN\'T COVERED'],
     ['- Add-ons (extra text/number/checkbox fields on a product) are not in this sheet and are never changed by a sync.'],
     ['- Colour/image swatches on brand-new option values created via this sheet are not carried across - add those in the admin.'],
@@ -79,7 +84,7 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
     // Sensible starting column widths across the used range (harmless on unused).
     requests.push({
       updateDimensionProperties: {
-        range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 30 },
+        range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 45 },
         properties: { pixelSize: 160 },
         fields: 'pixelSize',
       },
@@ -98,6 +103,8 @@ const VALIDATION_LISTS: Record<string, string[]> = {
   type: ['PHYSICAL', 'DIGITAL', 'SERVICE'],
   status: ['DRAFT', 'ACTIVE', 'ARCHIVED'],
   out_of_stock_behaviour: ['BLOCK', 'BACKORDER'],
+  related_mode: ['MANUAL', 'AUTOMATIC'],
+  upsell_mode: ['MANUAL', 'AUTOMATIC'],
 }
 
 export async function applyProductsValidation(spreadsheetId: string, columns: string[]): Promise<void> {

@@ -37,14 +37,31 @@ function computeChanges(existing: ShpProduct, row: string[], header: string[]): 
     const from = upper ? current.toUpperCase() : current
     if (!sameValue(from, to)) changes.push({ field, from: current, to: raw })
   }
+  const str = (v: string | number | boolean | null | undefined) => (v == null ? '' : String(v))
   check('name', 'name', existing.name)
+  check('slug', 'slug', existing.slug)
   check('type', 'type', existing.type, true)
   check('status', 'status', existing.status, true)
   check('price', 'price', existing.price)
   check('compare_at_price', 'compare_at_price', existing.compareAtPrice ?? '')
   check('cost_price', 'cost_price', existing.costPrice ?? '')
-  check('stock_count', 'stock_count', existing.stockCount != null ? String(existing.stockCount) : '')
+  check('stock_count', 'stock_count', str(existing.stockCount))
   check('barcode', 'barcode', existing.barcode ?? '')
+  check('weight', 'weight', existing.weight ?? '')
+  check('dimension_l', 'dimension_l', str(existing.dimensionL))
+  check('dimension_w', 'dimension_w', str(existing.dimensionW))
+  check('dimension_h', 'dimension_h', str(existing.dimensionH))
+  check('dimension_unit', 'dimension_unit', existing.dimensionUnit ?? '')
+  check('download_limit', 'download_limit', str(existing.downloadLimit))
+  check('download_expiry', 'download_expiry', str(existing.downloadExpiry))
+  check('is_pre_order', 'is_pre_order', String(existing.isPreOrder), true)
+  check('pre_order_dispatch_date', 'pre_order_dispatch_date', existing.preOrderDispatchDate ? existing.preOrderDispatchDate.toISOString().slice(0, 10) : '')
+  check('pre_order_note', 'pre_order_note', existing.preOrderNote ?? '')
+  check('pre_order_max_quantity', 'pre_order_max_quantity', str(existing.preOrderMaxQuantity))
+  check('related_mode', 'related_mode', existing.relatedMode, true)
+  check('related_limit', 'related_limit', str(existing.relatedLimit))
+  check('upsell_mode', 'upsell_mode', existing.upsellMode, true)
+  check('upsell_limit', 'upsell_limit', str(existing.upsellLimit))
   return changes
 }
 
@@ -128,6 +145,7 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
   const priceCol = header.indexOf('price')
   const statusCol = header.indexOf('status')
   const skuCol = header.indexOf('sku')
+  const slugCol = header.indexOf('slug')
 
   const all = await collectPaged<ShpProduct>(async (page) => {
     const { products, total } = await listProducts({ page, perPage: 100, excludeHidden: true })
@@ -162,7 +180,11 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
       if (!priceRaw || Number.isNaN(Number(priceRaw))) { rowErrors.push({ row: rowNumber, reason: 'Missing or invalid price' }); continue }
       if (statusRaw && !VALID_STATUS.has(statusRaw.toUpperCase())) { rowErrors.push({ row: rowNumber, reason: `Invalid status "${statusRaw}"` }); continue }
 
-      const existing = sku ? bySku.get(sku) : bySlug.get(slugify(name))
+      // Same identity the import engine uses: the row's own slug when the sheet
+      // carries one, else the slug derived from the name. Diverging here would
+      // show the owner a create/update split the Pull then contradicts.
+      const rowSlug = slugify(at(slugCol) || name)
+      const existing = sku ? bySku.get(sku) : bySlug.get(rowSlug)
       if (existing) toUpdate.push({ sku, name, changes: computeChanges(existing, row, header) })
       else toCreate.push({ sku, name })
     }
