@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db/prisma'
 import { listProducts } from '@/modules/shop/lib/db'
 import { collectPaged } from '@/modules/shop/lib/csv'
 import { slugify } from '@/modules/shop/lib/slug'
-import { getEditorPayload } from '@/modules/shop-variations/lib/variants-service'
+import { getEditorPayloadsBatch } from '@/modules/shop-variations/lib/variants-service'
 import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 
@@ -125,11 +125,24 @@ export async function planPullDeletions(
   const candidates: VariantDeletion[] = []
   const handled = new Set<string>()
 
+  // Every parent this function will ever look at - the partial case (still has
+  // sheet rows) and the empty case (variants but no rows left) below - fetched in
+  // one batch rather than once per parent per case. A catalogue with hundreds of
+  // variant parents used to mean that many getEditorPayload round trips, twice
+  // over on a Pull (once from the preview, once from the run itself).
+  const withVariants = await getProductIdsWithVariations()
+  const partialParentIds = new Set(
+    [...rowsBySlug.keys()].map((slug) => survivingBySlug.get(slug)?.id).filter((id): id is string => !!id),
+  )
+  const emptyParentIds = withVariants.filter((id) => survivingIds.has(id) && !partialParentIds.has(id))
+  const neededIds = new Set([...partialParentIds, ...emptyParentIds])
+  const payloadByParentId = await getEditorPayloadsBatch(surviving.filter((p) => neededIds.has(p.id)))
+
   // Partial case: a parent that still has rows, minus the combos those rows list.
   for (const [slug, rows] of rowsBySlug) {
     const parent = survivingBySlug.get(slug)
     if (!parent) continue // parent gone or not in the sheet -> products pass owns it
-    const payload = await getEditorPayload(parent.id)
+    const payload = payloadByParentId.get(parent.id)
     if (!payload) continue
     handled.add(parent.id)
 
@@ -160,10 +173,9 @@ export async function planPullDeletions(
 
   // Empty case: a surviving parent that has variants but no rows left in the sheet
   // - the owner cleared its whole block, so every variant it has is unwanted.
-  const withVariants = await getProductIdsWithVariations()
   for (const parentId of withVariants) {
     if (!survivingIds.has(parentId) || handled.has(parentId)) continue
-    const payload = await getEditorPayload(parentId)
+    const payload = payloadByParentId.get(parentId)
     if (!payload) continue
     for (const v of payload.variants) {
       if (v.optionValueIds.length === 0) continue

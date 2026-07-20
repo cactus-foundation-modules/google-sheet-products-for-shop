@@ -1,12 +1,12 @@
 {
   "name": "google-sheet-products-for-shop",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "tablePrefix": "gsp_",
   "description": "Mirrors your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.",
   "requiresCoreVersion": "0.5.486",
   "requiresModules": [
     { "name": "shop", "minVersion": "0.1.68" },
-    { "name": "shop-variations", "minVersion": "0.1.15" }
+    { "name": "shop-variations", "minVersion": "0.1.65" }
   ],
   "permissions": ["googlesheets.manage"],
   "navEntries": [],

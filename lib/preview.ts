@@ -1,9 +1,9 @@
 import { prisma } from '@/lib/db/prisma'
 import { listProducts } from '@/modules/shop/lib/db'
-import { getProductBySlug } from '@/modules/shop/lib/db/products'
+import { getProductsBySlugs } from '@/modules/shop/lib/db/products'
 import { collectPaged, missingFormatColumns } from '@/modules/shop/lib/csv'
 import { slugify } from '@/modules/shop/lib/slug'
-import { getEditorPayload, type VariantEditorRow } from '@/modules/shop-variations/lib/variants-service'
+import { getEditorPayloadsBatch, type VariantEditorRow } from '@/modules/shop-variations/lib/variants-service'
 import { parseVariantImages } from '@/modules/shop-variations/lib/csv'
 import { resolveVariantFieldProviders } from '@/modules/shop-variations/lib/variant-field-providers'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
@@ -171,13 +171,19 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     groups.set(slug, list)
   }
 
+  // Both the parent lookup and each parent's editor payload are resolved once for
+  // every distinct slug in the sheet, rather than per group - a sheet naming
+  // hundreds of parents used to fire that many round trips for each.
+  const parentBySlug = await getProductsBySlugs([...groups.keys()])
+  const payloadByParentId = await getEditorPayloadsBatch([...parentBySlug.values()])
+
   for (const [slug, rows] of groups) {
-    const parent = await getProductBySlug(slug)
-    if (!parent || parent.catalogueHidden) {
+    const parent = parentBySlug.get(slug)
+    if (!parent) {
       for (const gr of rows) rowErrors.push({ row: gr.rowNum, reason: `Parent product not found: ${slug}` })
       continue
     }
-    const payload = await getEditorPayload(parent.id)
+    const payload = payloadByParentId.get(parent.id)
     const valueIdByKey = new Map<string, string>()
     for (const o of payload?.options ?? []) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
     const variantByKey = new Map((payload?.variants ?? []).map((v) => [[...v.optionValueIds].sort().join('|'), v]))
