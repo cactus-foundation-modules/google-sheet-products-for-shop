@@ -3,7 +3,8 @@ import { listProducts } from '@/modules/shop/lib/db'
 import { getProductBySlug } from '@/modules/shop/lib/db/products'
 import { collectPaged, missingFormatColumns } from '@/modules/shop/lib/csv'
 import { slugify } from '@/modules/shop/lib/slug'
-import { getEditorPayload } from '@/modules/shop-variations/lib/variants-service'
+import { getEditorPayload, type VariantEditorRow } from '@/modules/shop-variations/lib/variants-service'
+import { parseVariantImages } from '@/modules/shop-variations/lib/csv'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 import type { GspConnection, PullPreview, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
@@ -67,6 +68,40 @@ function computeChanges(existing: ShpProduct, row: string[], header: string[]): 
   return changes
 }
 
+// Blank/non-numeric -> undefined, exactly as the importer's num() treats a cell.
+function numCell(s: string): number | undefined {
+  if (s.trim() === '') return undefined
+  const n = Number(s)
+  return Number.isFinite(n) ? n : undefined
+}
+
+// Would the importer actually write anything for this row? Mirrors the changed
+// check in upsertVariantForCombination plus its image compare, field for field -
+// the preview's "to update" must mean "a value differs", not "the row exists".
+// Counting every matched row (as this used to) made a Pull straight after a Push
+// claim the whole catalogue needed updating when nothing had changed at all.
+function variationRowChanged(
+  v: VariantEditorRow,
+  cols: string[],
+  col: { sku: number; price: number; stock: number; barcode: number; supplier: number; weight: number; image: number },
+): boolean {
+  const cell = (i: number) => (cols[i] ?? '').trim()
+  if (col.price >= 0) {
+    const price = numCell(cell(col.price))
+    if (price !== undefined && v.price !== price) return true
+  }
+  if (col.sku >= 0 && (v.sku ?? null) !== (cell(col.sku) || null)) return true
+  if (col.barcode >= 0 && (v.barcode ?? null) !== (cell(col.barcode) || null)) return true
+  if (col.supplier >= 0 && (v.supplier ?? null) !== (cell(col.supplier) || null)) return true
+  if (col.stock >= 0 && (v.stockCount ?? null) !== (numCell(cell(col.stock)) ?? null)) return true
+  if (col.weight >= 0 && (v.weight ?? null) !== (numCell(cell(col.weight)) ?? null)) return true
+  if (col.image >= 0) {
+    const urls = parseVariantImages(cell(col.image))
+    if (urls.length !== v.imageUrls.length || urls.some((u, i) => u !== v.imageUrls[i])) return true
+  }
+  return false
+}
+
 // Create/update counts only. Deletions (partial + emptied parents, with the
 // push-baseline anchor) come from planPullDeletions, the same planner the Pull
 // runs, so the preview's "to remove" count matches exactly what happens.
@@ -89,6 +124,10 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     const valueCol = idx(`Value ${i}`)
     if (nameCol < 0 || valueCol < 0) break
     optionPairs.push({ nameCol, valueCol })
+  }
+  const fieldCol = {
+    sku: idx('Variant SKU'), price: idx('Price'), stock: idx('Stock'),
+    barcode: idx('Barcode'), supplier: idx('Supplier'), weight: idx('Weight'), image: idx('Image'),
   }
 
   const groups = new Map<string, Array<{ rowNum: number; cols: string[] }>>()
@@ -113,7 +152,7 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     const payload = await getEditorPayload(parent.id)
     const valueIdByKey = new Map<string, string>()
     for (const o of payload?.options ?? []) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
-    const existingSets = new Set((payload?.variants ?? []).map((v) => [...v.optionValueIds].sort().join('|')))
+    const variantByKey = new Map((payload?.variants ?? []).map((v) => [[...v.optionValueIds].sort().join('|'), v]))
 
     for (const gr of rows) {
       const ids: string[] = []
@@ -128,9 +167,10 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
       }
       if (!allResolvable) { toCreate++; continue }
       if (ids.length === 0) { rowErrors.push({ row: gr.rowNum, reason: 'No options on this row' }); continue }
-      const key = [...ids].sort().join('|')
-      if (existingSets.has(key)) toUpdate++
-      else toCreate++
+      const existing = variantByKey.get([...ids].sort().join('|'))
+      if (!existing) toCreate++
+      else if (variationRowChanged(existing, gr.cols, fieldCol)) toUpdate++
+      // else: the row matches what's stored - the Pull will touch nothing for it.
     }
   }
 

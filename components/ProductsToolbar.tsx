@@ -257,18 +257,48 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
     }, 1500)
   }, [stopPolling])
 
+  // How many times a step may fail in a row before we stop and offer Continue.
+  // A failure that follows real progress resets the count, so a long pull with
+  // the odd hiccup keeps going; only a genuinely stuck one ever surfaces.
+  const MAX_STEP_RETRIES = 5
+
   const runSteps = useCallback(async (jobId: string) => {
     if (looping.current) return
     looping.current = true
     setPulling(true)
+    setLoadErr(null)
     startPolling(jobId)
+    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
+    const progressOf = (s: PullStatus) => `${s.phase}:${s.productsDone}:${s.variationsDone}`
+    let retries = 0
+    let lastProgress: string | null = null
     try {
       for (;;) {
-        const r = await fetch(`${BASE}/pull/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pullJobId: jobId }) })
-        const j = await r.json().catch(() => null)
-        if (!r.ok || !j?.status) { setLoadErr(j?.error ?? 'The pull could not continue. Try Continue in a moment.'); break }
-        setStatus(j.status)
-        if (j.status.done || j.status.status === 'FAILED') break
+        let failReason: string | null = null
+        try {
+          const r = await fetch(`${BASE}/pull/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pullJobId: jobId }) })
+          const j = await r.json().catch(() => null)
+          if (r.ok && j?.status) {
+            setStatus(j.status)
+            if (j.status.done) break
+            const progress = progressOf(j.status)
+            if (progress !== lastProgress) { lastProgress = progress; retries = 0 }
+            if (j.status.status !== 'FAILED') continue
+            // A FAILED job keeps its cursor; stepping it again retries the same
+            // batch, so transient causes (a DB blip, a killed request) self-heal.
+            failReason = j.status.error ?? 'The pull hit a snag.'
+          } else {
+            failReason = j?.error ?? 'The pull could not continue.'
+          }
+        } catch {
+          failReason = 'The connection dropped.' // network hiccup - retry quietly
+        }
+        retries += 1
+        if (retries > MAX_STEP_RETRIES) {
+          setLoadErr(`${failReason} It was retried ${MAX_STEP_RETRIES} times without getting further - press Continue to keep trying, or Cancel.`)
+          break
+        }
+        await sleep(Math.min(2000 * retries, 8000))
       }
     } finally {
       looping.current = false
@@ -292,6 +322,17 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
   }, [resumable])
 
   useEffect(() => () => stopPolling(), [stopPolling])
+
+  // Opened onto an unfinished job: resume it straight away - the whole point of
+  // a resumable pull is that it resumes, not that it waits for a button. Once
+  // per modal open; if the auto-run then exhausts its retries, Continue takes over.
+  const autoResumed = useRef(false)
+  useEffect(() => {
+    if (resumable && !autoResumed.current) {
+      autoResumed.current = true
+      void runSteps(resumable.pullJobId)
+    }
+  }, [resumable, runSteps])
 
   // Keep the parent's Continue prompt in step with where we end up.
   useEffect(() => {
@@ -341,6 +382,8 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
       <Modal title={title} onClose={onClose}>
         {status.done ? (
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Pull complete.</p>
+        ) : failed && pulling ? (
+          <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Hit a snag - retrying automatically…</p>
         ) : failed ? (
           <p style={{ color: 'var(--color-danger)', fontWeight: 600, marginBottom: '0.75rem' }}>
             The pull stopped: {status.error ?? 'unknown error'}. Nothing is lost - press Continue to pick up where it left off.
