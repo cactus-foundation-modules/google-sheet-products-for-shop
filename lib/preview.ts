@@ -5,6 +5,7 @@ import { collectPaged, missingFormatColumns } from '@/modules/shop/lib/csv'
 import { slugify } from '@/modules/shop/lib/slug'
 import { getEditorPayload, type VariantEditorRow } from '@/modules/shop-variations/lib/variants-service'
 import { parseVariantImages } from '@/modules/shop-variations/lib/csv'
+import { resolveVariantFieldProviders } from '@/modules/shop-variations/lib/variant-field-providers'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 import type { GspConnection, PullPreview, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
@@ -102,6 +103,25 @@ function variationRowChanged(
   return false
 }
 
+// Would any provider column change for this row? Builds the same header-keyed row
+// record the importer hands providers, then asks each provider's read-only
+// rowChanged, stopping at the first that says yes.
+async function providerRowChanged(
+  providers: Awaited<ReturnType<typeof resolveVariantFieldProviders>>,
+  parentId: string,
+  childProductId: string,
+  header: string[],
+  cols: string[],
+  providerCtx: Map<string, unknown>,
+): Promise<boolean> {
+  const rowRecord: Record<string, string> = {}
+  header.forEach((h, i) => { rowRecord[h] = (cols[i] ?? '').trim() })
+  for (const { id, provider } of providers) {
+    if (await provider.rowChanged!(parentId, childProductId, rowRecord, providerCtx.get(id))) return true
+  }
+  return false
+}
+
 // Create/update counts only. Deletions (partial + emptied parents, with the
 // push-baseline anchor) come from planPullDeletions, the same planner the Pull
 // runs, so the preview's "to remove" count matches exactly what happens.
@@ -130,6 +150,14 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     barcode: idx('Barcode'), supplier: idx('Supplier'), weight: idx('Weight'), image: idx('Image'),
   }
 
+  // Modules hang extra per-variant columns (3D files, attribute helpings) off the
+  // sheet through this point. Their columns are diffed via each provider's
+  // read-only rowChanged, so a Pull that would swap a 3D file or a variation
+  // attribute is counted as an update here instead of being reported as "nothing
+  // to update" and then quietly doing it on apply. A provider without rowChanged
+  // (there were none before this existed) is simply not counted, as before.
+  const providers = (await resolveVariantFieldProviders()).filter((p) => typeof p.provider.rowChanged === 'function')
+
   const groups = new Map<string, Array<{ rowNum: number; cols: string[] }>>()
   for (let r = 1; r < grid.length; r++) {
     const cols = grid[r] ?? []
@@ -154,6 +182,17 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
     for (const o of payload?.options ?? []) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
     const variantByKey = new Map((payload?.variants ?? []).map((v) => [[...v.optionValueIds].sort().join('|'), v]))
 
+    // Preload each provider's current state for this parent's existing children,
+    // exactly as the importer does, so rowChanged diffs in memory rather than
+    // per row. A child created mid-import is absent here and reads as empty.
+    const providerCtx = new Map<string, unknown>()
+    if (providers.length > 0) {
+      const childIds = (payload?.variants ?? []).map((v) => v.childProductId)
+      for (const { id, provider } of providers) {
+        if (provider.beginImport) providerCtx.set(id, await provider.beginImport(parent.id, childIds))
+      }
+    }
+
     for (const gr of rows) {
       const ids: string[] = []
       let allResolvable = true
@@ -168,8 +207,11 @@ async function predictVariations(grid: string[][]): Promise<{ toCreate: number; 
       if (!allResolvable) { toCreate++; continue }
       if (ids.length === 0) { rowErrors.push({ row: gr.rowNum, reason: 'No options on this row' }); continue }
       const existing = variantByKey.get([...ids].sort().join('|'))
-      if (!existing) toCreate++
-      else if (variationRowChanged(existing, gr.cols, fieldCol)) toUpdate++
+      if (!existing) { toCreate++; continue }
+      if (variationRowChanged(existing, gr.cols, fieldCol)) { toUpdate++; continue }
+      // Built-in fields match. Ask each provider whether its own columns would
+      // change - a differing 3D file or attribute cell still means "to update".
+      if (providers.length > 0 && await providerRowChanged(providers, parent.id, existing.childProductId, header, gr.cols, providerCtx)) toUpdate++
       // else: the row matches what's stored - the Pull will touch nothing for it.
     }
   }

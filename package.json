@@ -1,6 +1,6 @@
 {
   "name": "cactus-module-google-sheet-products-for-shop",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Google Sheet Products for Shop module for Cactus — mirror the shop catalogue into a Google Sheet and pull edits back in",
   "license": "MIT",
   "private": true

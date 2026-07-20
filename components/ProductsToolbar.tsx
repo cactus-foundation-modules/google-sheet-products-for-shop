@@ -99,13 +99,23 @@ export function GoogleSheetProductsToolbar() {
   // Only render once a sheet is actually connected; setup lives in Settings.
   if (!settings || !settings.hasOAuthConnected || !settings.spreadsheetId) return null
 
-  async function push() {
+  async function push(force = false) {
     setMenuOpen(false)
     setBusy('push')
     setToast(null)
-    const res = await fetch(`${BASE}/push`, { method: 'POST' })
+    const res = await fetch(`${BASE}/push`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
+    })
     const body = await res.json().catch(() => ({}))
     setBusy(null)
+    // The sheet was edited since Cactus last synced it. Let the owner decide
+    // whether to overwrite those edits rather than doing it silently.
+    if (res.status === 409 && body.needsConfirm) {
+      if (confirm(`${body.error}\n\nOverwrite the sheet anyway?`)) await push(true)
+      return
+    }
     setToast(res.ok
       ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.`
       : (body.error ?? 'Push failed.'))
@@ -153,7 +163,7 @@ export function GoogleSheetProductsToolbar() {
               Open sheet ↗
             </a>
           )}
-          <button type="button" className="gsp-menu-item" onClick={push} role="menuitem">Push to sheet</button>
+          <button type="button" className="gsp-menu-item" onClick={() => push()} role="menuitem">Push to sheet</button>
           <button type="button" className="gsp-menu-item" onClick={openPull} role="menuitem">Pull from sheet…</button>
           <button type="button" className="gsp-menu-item" onClick={openLogs} role="menuitem">Sheet logs</button>
         </div>

@@ -97,6 +97,22 @@ export async function readGrid(spreadsheetId: string, tab: string): Promise<stri
   return (data.values ?? []).map((row) => row.map((cell) => (cell == null ? '' : String(cell))))
 }
 
+// drive.files.get - the sheet's last-modified time (RFC3339), or null when Drive
+// won't say. Used by Push to spot edits made in the sheet since Cactus last
+// synced it, before overwriting them. drive.file scope covers metadata on the
+// app's own file, so no extra scope is needed. The sheet's own content edits
+// bump this; the app's push writes bump it too, which is why the caller compares
+// against the push/pull stamps (both taken AFTER the app's write) with a margin.
+const DRIVE_API = 'https://www.googleapis.com/drive/v3/files'
+export async function getSheetModifiedTime(spreadsheetId: string): Promise<Date | null> {
+  const res = await googleFetch(`${DRIVE_API}/${spreadsheetId}?fields=modifiedTime`, { method: 'GET' })
+  if (!res.ok) return null
+  const data = (await res.json().catch(() => null)) as { modifiedTime?: string } | null
+  if (!data?.modifiedTime) return null
+  const t = new Date(data.modifiedTime)
+  return Number.isNaN(t.getTime()) ? null : t
+}
+
 // values.clear
 export async function clearTab(spreadsheetId: string, tab: string): Promise<void> {
   await ok(
