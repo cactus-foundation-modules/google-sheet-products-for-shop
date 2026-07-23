@@ -30,13 +30,62 @@ async function googleFetch(url: string, init: RequestInit, allowRetry = true): P
   return res
 }
 
+// A Sheets/Drive call that came back with a status we cannot use. Carries the
+// pieces a caller needs to tell the owner what actually went wrong, so a route
+// no longer has to flatten every cause into one "could not read the sheet".
+export class SheetsApiError extends Error {
+  readonly status: number
+  readonly what: string
+  // Google's own one-line explanation, e.g. "Unable to parse range: 'Products'".
+  readonly googleMessage: string
+  constructor(what: string, status: number, googleMessage: string) {
+    super(`Google Sheets ${what} failed: ${status} ${googleMessage}`)
+    this.name = 'SheetsApiError'
+    this.what = what
+    this.status = status
+    this.googleMessage = googleMessage
+  }
+}
+
+// Google's error bodies are JSON ({ error: { message } }) on every documented
+// failure, but a proxy or a quota page can return HTML instead, so fall back to
+// the raw text rather than losing the reason entirely.
+function googleErrorMessage(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as { error?: { message?: string } }
+    if (parsed?.error?.message) return parsed.error.message
+  } catch {
+    // not JSON - fall through
+  }
+  return text.trim().slice(0, 300) || 'no detail given'
+}
+
 async function ok(res: Response, what: string): Promise<Response> {
   if (res.ok) return res
   if (res.status === 401 || res.status === 403) {
     throw new GoogleAuthError(`Google refused the ${what} request (${res.status}). Reconnect the account on the settings page.`)
   }
   const text = await res.text().catch(() => '')
-  throw new Error(`Google Sheets ${what} failed: ${res.status} ${text.slice(0, 500)}`)
+  throw new SheetsApiError(what, res.status, googleErrorMessage(text))
+}
+
+// One sentence an owner can act on, for anything thrown while talking to Google.
+// Never a stack trace, and never Google's raw body beyond its message line - the
+// two named cases below are the ones that actually reach support:
+//   - a renamed or deleted tab, which no amount of resetting the sheet fixes
+//   - Google being slow enough to hit the 30s per-call timeout above
+export function sheetFailureReason(err: unknown): string {
+  if (err instanceof SheetsApiError) {
+    if (/unable to parse range/i.test(err.googleMessage)) {
+      return `Google could not find that tab in your spreadsheet (${err.googleMessage}). A tab has been renamed or deleted - restore the "Products" and "Variations" tab names, or create the sheet again from the settings page.`
+    }
+    return `Google refused the request (${err.status}): ${err.googleMessage}`
+  }
+  // AbortSignal.timeout rejects with a TimeoutError DOMException.
+  if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+    return 'Google took too long to answer (over 30 seconds). Try again in a minute.'
+  }
+  return err instanceof Error ? err.message : 'Unknown error'
 }
 
 export type CreatedSpreadsheet = {

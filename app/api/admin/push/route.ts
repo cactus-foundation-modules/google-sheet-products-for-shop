@@ -6,7 +6,7 @@ import { getConnection, stampLastPush } from '@/modules/google-sheet-products-fo
 import { pushProductsTab } from '@/modules/google-sheet-products-for-shop/lib/push-products'
 import { pushVariationsTab } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
 import { pushSupplierCataloguesTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
-import { getSheetModifiedTime } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 
@@ -72,9 +72,9 @@ export async function POST(req: NextRequest) {
       formulasKept: products.preservedFormulas + variations.preservedFormulas,
     })
   } catch (err) {
-    const message = err instanceof GoogleAuthError ? err.message : 'The push to Google Sheets failed. Please try again.'
+    const message = err instanceof GoogleAuthError ? err.message : `The push to Google Sheets failed. ${sheetFailureReason(err)}`
     if (!(err instanceof GoogleAuthError)) {
-      console.error('[google-sheet-products-for-shop/push] failed:', err instanceof Error ? err.message : 'Unknown error')
+      console.error('[google-sheet-products-for-shop/push] failed:', sheetFailureReason(err))
     }
     await writeSyncLog({ direction: 'PUSH', tab: 'PRODUCTS', status: 'FAILED', errors: [{ row: 0, reason: message }], runBy: user.id })
     return errorResponse(message, err instanceof GoogleAuthError ? 400 : 502)

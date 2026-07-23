@@ -4,7 +4,7 @@ import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { createImportJob, markImportJobStarted } from '@/modules/shop/lib/db/import-jobs'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { readGrid } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { createPullJob, getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
@@ -42,8 +42,9 @@ export async function POST(req: NextRequest) {
     variationsGrid = await readGrid(conn.spreadsheetId, TAB.VARIATIONS)
   } catch (err) {
     if (err instanceof GoogleAuthError) return errorResponse(err.message, 400)
-    console.error('[google-sheet-products-for-shop/pull] read failed:', err instanceof Error ? err.message : 'Unknown error')
-    return errorResponse('Could not read the Google Sheet. Please try again.', 502)
+    const reason = sheetFailureReason(err)
+    console.error('[google-sheet-products-for-shop/pull] read failed:', reason)
+    return errorResponse(`Could not read the Google Sheet. ${reason}`, 502)
   }
 
   const missing = missingProductsColumns(productsGrid)

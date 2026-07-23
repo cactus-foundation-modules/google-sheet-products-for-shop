@@ -12,6 +12,17 @@ const BASE = '/api/m/google-sheet-products-for-shop/admin'
 const muted = { color: 'var(--color-text-muted)' }
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString('en-GB') : 'never')
 
+// A failed response carries { error } whenever the route itself answered. It does
+// not when the platform answers over the route's head - a 504 at the sixty-second
+// ceiling, or a crash before any handler ran - and the fallback text alone then
+// reads as a verdict on the sheet, which is exactly what it is not. Say which of
+// the two happened.
+function failureText(res: Response, body: { error?: unknown }, fallback: string): string {
+  if (typeof body.error === 'string' && body.error) return body.error
+  if (res.status === 504) return `${fallback} It ran out of time (sixty seconds) before your site answered.`
+  return `${fallback} Your site answered with an error (HTTP ${res.status}) rather than a reason.`
+}
+
 type Settings = { hasOAuthConnected: boolean; spreadsheetId: string | null; spreadsheetUrl: string | null; lastPullAt: string | null }
 
 type RowError = { row: number; reason: string }
@@ -124,7 +135,7 @@ export function GoogleSheetProductsToolbar() {
       : ''
     setToast(res.ok
       ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.${catalogues}${kept}`
-      : (body.error ?? 'Push failed.'))
+      : failureText(res, body, 'Push failed.'))
   }
 
   function openPull() {
@@ -332,7 +343,7 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
       const body = await res.json().catch(() => ({}))
       if (cancelled) return
       if (res.ok) setPreview(body.preview)
-      else setLoadErr(body.error ?? 'Could not read the sheet.')
+      else setLoadErr(failureText(res, body, 'Could not read the sheet.'))
     })()
     return () => { cancelled = true }
   }, [resumable])
@@ -363,7 +374,7 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
     const res = await fetch(`${BASE}/pull`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ detected }) })
     const body = await res.json().catch(() => ({}))
     if (res.status === 409 && body.pullJobId) { pullJobId.current = body.pullJobId; await runSteps(body.pullJobId); return }
-    if (!res.ok || !body.pullJobId) { setLoadErr(body.error ?? 'Pull failed to start.'); return }
+    if (!res.ok || !body.pullJobId) { setLoadErr(failureText(res, body, 'Pull failed to start.')); return }
     pullJobId.current = body.pullJobId
     setStatus({
       pullJobId: body.pullJobId, status: 'RUNNING', phase: 'PRODUCTS', done: false,
