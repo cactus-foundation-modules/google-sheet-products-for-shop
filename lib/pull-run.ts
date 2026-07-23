@@ -112,8 +112,11 @@ const PULL_LOCK_NAMESPACE = 0x67737001 // "gsp\x01", a signed int4
 async function withPullStepLock(jobId: string, fn: () => Promise<void>): Promise<boolean> {
   return prisma.$transaction(
     async (tx) => {
+      // The ::int4 cast is load-bearing: Prisma binds a JS number as bigint, and
+      // Postgres has no (bigint, integer) overload of this function - without the
+      // cast every call fails with 42883 and no step can ever run.
       const rows = await tx.$queryRaw<[{ locked: boolean }]>`
-        SELECT pg_try_advisory_xact_lock(${PULL_LOCK_NAMESPACE}, hashtext(${jobId})) AS "locked"
+        SELECT pg_try_advisory_xact_lock(${PULL_LOCK_NAMESPACE}::int4, hashtext(${jobId})) AS "locked"
       `
       if (!rows[0]?.locked) return false
       await fn()
@@ -272,9 +275,17 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
     })
   } catch (err) {
     // Only the lock transaction's own failures land here - a dropped connection,
-    // the 60s timeout - never a phase error, which runPullStep catches and records
-    // on the job. Leave the job as it stands and report the snapshot.
+    // the 60s timeout, a broken lock query - never a phase error, which
+    // runPullStep catches and records on the job. Swallowing this used to leave
+    // the job RUNNING with nothing running it, so the browser looped forever on
+    // an unchanging snapshot with no error anywhere. Record the failure on the
+    // job instead: the UI shows the reason and offers Continue, whose retry is
+    // safe because a FAILED job keeps its cursor. Best-effort - if the database
+    // is the thing that is down, this write fails too and there is nothing more
+    // to be done from here.
     console.error('[google-sheet-products-for-shop] pull step lock failed:', err)
+    const reason = err instanceof Error ? err.message : 'Unknown error'
+    await updatePullJob(jobId, { status: 'FAILED', error: `A pull step could not run: ${reason}` }).catch(() => {})
   }
 
   const after = await getPullJob(jobId)
