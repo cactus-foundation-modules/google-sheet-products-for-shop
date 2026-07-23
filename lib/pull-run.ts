@@ -8,6 +8,7 @@ import { applyProductDeletions, applyVariationDeletions } from '@/modules/google
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getPullJob, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { prisma } from '@/lib/db/prisma'
 import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // How many variation rows land in one importer call. Each call carries a fixed
@@ -77,15 +78,43 @@ async function finalizePullJob(job: PullJob): Promise<void> {
   await updatePullJob(job.id, { status: 'COMPLETED', phase: 'DONE', clearGrids: true })
 }
 
-// Run exactly one bounded slice of the Pull and return the live snapshot. Safe to
-// call repeatedly (the browser loops it) and safe to resume: every phase is
-// idempotent, so re-running a batch after a failure or a closed tab just re-does
-// no-ops until it gets past where it stopped. Returns null if the job is gone.
-export async function stepPullJob(jobId: string, adminEmail: string): Promise<PullStatus | null> {
-  const job = await getPullJob(jobId)
-  if (!job) return null
-  if (job.status === 'COMPLETED' || job.status === 'CANCELLED') return pullStatus(job)
+// A fixed namespace for this module's transaction-scoped advisory locks, so a
+// job-id hash cannot collide with an unrelated advisory lock taken elsewhere in
+// the app. Arbitrary but constant, and within int4 - what pg_advisory_* take.
+const PULL_LOCK_NAMESPACE = 0x67737001 // "gsp\x01", a signed int4
 
+// Run `fn` only when no other worker is already stepping this job, serialised by a
+// transaction-scoped advisory lock keyed on the job id. Returns false, without
+// running `fn`, when another worker holds the lock.
+//
+// pg_try_advisory_XACT_lock rather than the session-level pg_advisory_lock on
+// purpose: an xact lock lives and dies with this transaction, so a step the
+// platform kills at the module dispatcher's 60s ceiling takes its lock down with
+// the request instead of stranding it - the next Continue is free to claim the
+// job with no lease to wait out. It also survives connection pooling, where a
+// session lock taken on one pooled connection would not be held on the next.
+async function withPullStepLock(jobId: string, fn: () => Promise<void>): Promise<boolean> {
+  return prisma.$transaction(
+    async (tx) => {
+      const rows = await tx.$queryRaw<[{ locked: boolean }]>`
+        SELECT pg_try_advisory_xact_lock(${PULL_LOCK_NAMESPACE}, hashtext(${jobId})) AS "locked"
+      `
+      if (!rows[0]?.locked) return false
+      await fn()
+      return true
+    },
+    // A step runs right up to the dispatcher's ceiling, so the transaction (and
+    // its lock) must be allowed to live that long. maxWait is only how long to
+    // queue for a pooled connection to begin the transaction.
+    { timeout: 60_000, maxWait: 10_000 },
+  )
+}
+
+// One bounded slice of the Pull, run under the job lock by stepPullJob. Every
+// phase is idempotent, so re-running a batch after a failure or a closed tab just
+// re-does no-ops until it gets past where it stopped.
+async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
+  const jobId = job.id
   try {
     if (job.phase === 'PRODUCTS') {
       if (!job.productsGrid || !job.shopImportJobId) throw new Error('Pull job is missing its products snapshot.')
@@ -162,6 +191,37 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
     // A failed step leaves the cursor intact and the job FAILED, so Continue can
     // retry this same batch once the cause (a bad row, a transient DB blip) clears.
     await updatePullJob(jobId, { status: 'FAILED', error: err instanceof Error ? err.message : 'Unknown error' })
+  }
+}
+
+// Run exactly one bounded slice of the Pull and return the live snapshot. Safe to
+// call repeatedly (the browser loops it) and safe to resume: every phase is
+// idempotent, so re-running a batch after a failure or a closed tab just re-does
+// no-ops until it gets past where it stopped. Returns null if the job is gone.
+export async function stepPullJob(jobId: string, adminEmail: string): Promise<PullStatus | null> {
+  const job = await getPullJob(jobId)
+  if (!job) return null
+  if (job.status === 'COMPLETED' || job.status === 'CANCELLED') return pullStatus(job)
+
+  // Serialise steps for one job. Two open tabs, or a wedged request and the
+  // browser's retry, must never run a phase at once: the PRODUCTS phase would put
+  // the sheet through shop's engine twice over and double every SKU-less row, and
+  // the VARIATIONS cursor would be advanced twice for a single chunk. Losing the
+  // race is not an error - the loser just reports the current snapshot below and
+  // the browser polls again.
+  try {
+    await withPullStepLock(jobId, async () => {
+      // Re-read inside the lock: the worker that held it may have advanced or even
+      // finished the job between our first read and our acquiring it.
+      const fresh = await getPullJob(jobId)
+      if (!fresh || fresh.status === 'COMPLETED' || fresh.status === 'CANCELLED') return
+      await runPullStep(fresh, adminEmail)
+    })
+  } catch (err) {
+    // Only the lock transaction's own failures land here - a dropped connection,
+    // the 60s timeout - never a phase error, which runPullStep catches and records
+    // on the job. Leave the job as it stands and report the snapshot.
+    console.error('[google-sheet-products-for-shop] pull step lock failed:', err)
   }
 
   const after = await getPullJob(jobId)

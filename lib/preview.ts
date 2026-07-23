@@ -267,7 +267,7 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
 
       if (!name) { rowErrors.push({ row: rowNumber, reason: 'Missing name' }); continue }
       if (!VALID_TYPE.has(type)) { rowErrors.push({ row: rowNumber, reason: `Invalid type "${at(typeCol)}"` }); continue }
-      if (!priceRaw || Number.isNaN(Number(priceRaw))) { rowErrors.push({ row: rowNumber, reason: 'Missing or invalid price' }); continue }
+      if (!priceRaw || Number.isNaN(Number(priceRaw)) || Number(priceRaw) < 0) { rowErrors.push({ row: rowNumber, reason: 'Missing or invalid price' }); continue }
       if (statusRaw && !VALID_STATUS.has(statusRaw.toUpperCase())) { rowErrors.push({ row: rowNumber, reason: `Invalid status "${statusRaw}"` }); continue }
 
       // Same identity the import engine uses: the row's own slug when the sheet
