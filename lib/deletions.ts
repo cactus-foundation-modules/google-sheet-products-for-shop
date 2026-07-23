@@ -13,7 +13,7 @@ function comboKey(optionValueIds: string[]): string {
 }
 
 export type ProductDeletion = { id: string; sku: string | null; name: string }
-export type VariantDeletion = { childProductId: string; parentSlug: string; label: string }
+export type VariantDeletion = { childProductId: string; parentSlug: string; parentName: string; label: string }
 export type PullDeletionPlan = { products: ProductDeletion[]; variations: VariantDeletion[] }
 
 // Sheet product-row identity: a shop product counts as "still in the sheet" if
@@ -167,7 +167,7 @@ export async function planPullDeletions(
     for (const v of payload.variants) {
       if (v.optionValueIds.length === 0) continue
       if (wanted.has(comboKey(v.optionValueIds))) continue
-      candidates.push({ childProductId: v.childProductId, parentSlug: slug, label: v.label })
+      candidates.push({ childProductId: v.childProductId, parentSlug: slug, parentName: parent.name, label: v.label })
     }
   }
 
@@ -179,7 +179,7 @@ export async function planPullDeletions(
     if (!payload) continue
     for (const v of payload.variants) {
       if (v.optionValueIds.length === 0) continue
-      candidates.push({ childProductId: v.childProductId, parentSlug: payload.product.slug, label: v.label })
+      candidates.push({ childProductId: v.childProductId, parentSlug: payload.product.slug, parentName: payload.product.name, label: v.label })
     }
   }
 

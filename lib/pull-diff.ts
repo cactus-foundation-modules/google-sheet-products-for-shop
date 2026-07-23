@@ -31,7 +31,9 @@ export type ProductRowResult =
   | { row: number; kind: 'update'; sku: string | null; name: string; changes: Change[] }
   | { row: number; kind: 'unchanged'; sku: string | null; name: string }
 
-export type VariationRowResult = { row: number; kind: 'create' | 'update' | 'unchanged' | 'error'; reason?: string }
+// parentName/label ride along on 'update' rows so the preview can say WHICH
+// variation a row touches, not just how many rows will change.
+export type VariationRowResult = { row: number; kind: 'create' | 'update' | 'unchanged' | 'error'; reason?: string; parentName?: string; label?: string }
 
 const VALID_STATUS = new Set(['DRAFT', 'ACTIVE', 'ARCHIVED'])
 const VALID_TYPE = new Set(['PHYSICAL', 'DIGITAL', 'SERVICE'])
@@ -281,9 +283,9 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
       if (ids.length === 0) { results.push({ row: gr.row, kind: 'error', reason: 'No options on this row' }); continue }
       const existing = variantByKey.get([...ids].sort().join('|'))
       if (!existing) { results.push({ row: gr.row, kind: 'create' }); continue }
-      if (variationRowChanged(existing, gr.cols, fieldCol)) { results.push({ row: gr.row, kind: 'update' }); continue }
+      if (variationRowChanged(existing, gr.cols, fieldCol)) { results.push({ row: gr.row, kind: 'update', parentName: parent.name, label: existing.label }); continue }
       if (undiffableProviders || (providers.length > 0 && await providerRowChanged(providers, parent.id, existing.childProductId, header, gr.cols, providerCtx))) {
-        results.push({ row: gr.row, kind: 'update' })
+        results.push({ row: gr.row, kind: 'update', parentName: parent.name, label: existing.label })
         continue
       }
       results.push({ row: gr.row, kind: 'unchanged' })

@@ -19,7 +19,9 @@ export async function applyProductDeletions(products: ProductDeletion[]): Promis
 
 // Variants pruned by the plan - each is a hidden child product, so the same
 // bulk delete cascades its svr_variants + svr_variant_values rows.
-export async function applyVariationDeletions(variations: VariantDeletion[]): Promise<{ deleted: number; errors: SyncRowError[] }> {
+// Accepts just the child ids so plans stored by older versions (whose jsonb rows
+// predate parentName) replay unchanged.
+export async function applyVariationDeletions(variations: Array<Pick<VariantDeletion, 'childProductId'>>): Promise<{ deleted: number; errors: SyncRowError[] }> {
   if (variations.length === 0) return { deleted: 0, errors: [] }
   try {
     const deleted = await bulkDeleteProducts(variations.map((v) => v.childProductId))

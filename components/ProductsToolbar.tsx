@@ -35,7 +35,13 @@ type Preview = {
     unchanged: number
     rowErrors: RowError[]
   }
-  variations: { toCreate: number; toUpdate: number; toDelete: number; unchanged: number; rowErrors: RowError[] }
+  variations: {
+    toCreate: number
+    toUpdate: Array<{ parentName: string; label: string }>
+    toDelete: Array<{ childProductId: string; parentName: string; label: string }>
+    unchanged: number
+    rowErrors: RowError[]
+  }
   staleness: { changedSinceLastPush: number; since: string | null }
   headerMissing: string[]
 }
@@ -539,8 +545,8 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
 
   // Preview / confirm view (before the first step).
   const p = preview?.products
-  const deleteCount = (p?.toDelete.length ?? 0) + (preview?.variations.toDelete ?? 0)
-  const totalRows = p ? p.toCreate.length + p.toUpdate.length + p.unchanged + (preview?.variations.toCreate ?? 0) + (preview?.variations.toUpdate ?? 0) + (preview?.variations.unchanged ?? 0) : 0
+  const deleteCount = (p?.toDelete.length ?? 0) + (preview?.variations.toDelete.length ?? 0)
+  const totalRows = p ? p.toCreate.length + p.toUpdate.length + p.unchanged + (preview?.variations.toCreate ?? 0) + (preview?.variations.toUpdate.length ?? 0) + (preview?.variations.unchanged ?? 0) : 0
   const unchangedTotal = (p?.unchanged ?? 0) + (preview?.variations.unchanged ?? 0)
   const changedTotal = totalRows - unchangedTotal
   const nothingToDo = !!p && totalRows > 0 && changedTotal === 0 && deleteCount === 0
@@ -576,14 +582,8 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
 
           <ul style={{ margin: '0 0 0.75rem 1rem' }}>
             <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.toDelete.length ? `, ${p.toDelete.length} to delete` : ''}{p.rowErrors.length ? `, ${n(p.rowErrors.length, 'row')} with errors` : ''}.</li>
-            <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.toDelete ? `, ${preview.variations.toDelete} to remove` : ''}{preview.variations.rowErrors.length ? `, ${n(preview.variations.rowErrors.length, 'row')} with errors` : ''}.</li>
+            <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate.length} to update{preview.variations.toDelete.length ? `, ${preview.variations.toDelete.length} to remove` : ''}{preview.variations.rowErrors.length ? `, ${n(preview.variations.rowErrors.length, 'row')} with errors` : ''}.</li>
           </ul>
-
-          {preview.variations.toDelete > 0 && (
-            <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
-              {n(preview.variations.toDelete, 'variation is', 'variations are')} on your site but no longer in the sheet. Pulling removes {preview.variations.toDelete === 1 ? 'it' : 'them'} for good.
-            </p>
-          )}
 
           {(p.rowErrors.length > 0 || preview.variations.rowErrors.length > 0) && (
             <details style={{ marginBottom: '0.75rem' }}>
@@ -609,6 +609,16 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
             </details>
           )}
 
+          {preview.variations.toUpdate.length > 0 && (
+            <details style={{ marginBottom: '0.75rem' }}>
+              <summary style={{ cursor: 'pointer' }}>Which {n(preview.variations.toUpdate.length, 'variation')} will be updated</summary>
+              <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.5rem 0 0 1rem' }}>
+                {preview.variations.toUpdate.slice(0, 25).map((v, i) => <li key={i}>{v.parentName} - {v.label}</li>)}
+                {preview.variations.toUpdate.length > 25 && <li>…and {n(preview.variations.toUpdate.length - 25, 'more')}.</li>}
+              </ul>
+            </details>
+          )}
+
           {p.toDelete.length > 0 && (
             <div style={{ marginBottom: '0.75rem' }}>
               <div style={{ fontWeight: 600, color: 'var(--color-danger)' }}>In the shop but not in your sheet</div>
@@ -617,6 +627,18 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
               </p>
               <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.25rem 0 0 1rem' }}>
                 {p.toDelete.map((m) => <li key={m.id}>{m.name}{m.sku ? ` (${m.sku})` : ''}</li>)}
+              </ul>
+            </div>
+          )}
+
+          {preview.variations.toDelete.length > 0 && (
+            <div style={{ marginBottom: '0.75rem' }}>
+              <div style={{ fontWeight: 600, color: 'var(--color-danger)' }}>Variations on your site but not in your sheet</div>
+              <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
+                {n(preview.variations.toDelete.length, 'variation is', 'variations are')} on your site but no longer in the sheet. Pulling removes {preview.variations.toDelete.length === 1 ? 'it' : 'them'} for good.
+              </p>
+              <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.25rem 0 0 1rem', maxHeight: '12rem', overflowY: 'auto' }}>
+                {preview.variations.toDelete.map((v) => <li key={v.childProductId}>{v.parentName} - {v.label}</li>)}
               </ul>
             </div>
           )}

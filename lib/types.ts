@@ -61,7 +61,9 @@ export type PullDetected = {
 // is what gets removed. Shape matches lib/deletions.ts's PullDeletionPlan.
 export type StoredDeletionPlan = {
   products: Array<{ id: string; sku: string | null; name: string }>
-  variations: Array<{ childProductId: string; parentSlug: string; label: string }>
+  // parentName absent on plans stored before it existed; only childProductId is
+  // ever read back at delete time.
+  variations: Array<{ childProductId: string; parentSlug: string; parentName?: string; label: string }>
 }
 
 export type PullJob = {
@@ -130,7 +132,16 @@ export type PullPreview = {
     unchanged: number
     rowErrors: SyncRowError[]
   }
-  variations: { toCreate: number; toUpdate: number; toDelete: number; unchanged: number; rowErrors: SyncRowError[] }
+  variations: {
+    toCreate: number
+    // Which variation each changing row touches - parent product plus the
+    // variant's option label (e.g. "Oak / 1600mm").
+    toUpdate: Array<{ parentName: string; label: string }>
+    // On the site but absent from the sheet - Pull deletes these child products.
+    toDelete: Array<{ childProductId: string; parentName: string; label: string }>
+    unchanged: number
+    rowErrors: SyncRowError[]
+  }
   staleness: { changedSinceLastPush: number; since: string | null }
   // Required Products columns the sheet header is missing (Pull will refuse).
   headerMissing: string[]

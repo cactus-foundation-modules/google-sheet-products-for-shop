@@ -47,8 +47,10 @@ export async function buildPullPreview(productsGrid: string[][], variationsGrid:
   const varResults = await diffVariationRows(variationsGrid)
   const variations = {
     toCreate: varResults.filter((r) => r.kind === 'create').length,
-    toUpdate: varResults.filter((r) => r.kind === 'update').length,
-    toDelete: plan.variations.length,
+    toUpdate: varResults
+      .filter((r) => r.kind === 'update')
+      .map((r) => ({ parentName: r.parentName ?? 'Unknown product', label: r.label ?? `row ${r.row + 1}` })),
+    toDelete: plan.variations.map((v) => ({ childProductId: v.childProductId, parentName: v.parentName, label: v.label })),
     unchanged: varResults.filter((r) => r.kind === 'unchanged').length,
     rowErrors: varResults.filter((r) => r.kind === 'error').map((r) => ({ row: r.row + 1, reason: r.reason ?? 'Invalid row' })),
   }
