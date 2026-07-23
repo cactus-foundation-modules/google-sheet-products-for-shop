@@ -7,7 +7,7 @@ import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/
 import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { getPullJob, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { getPullJob, getPullJobStatus, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { prisma } from '@/lib/db/prisma'
 import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
@@ -64,6 +64,11 @@ export async function pullStatus(job: PullJob): Promise<PullStatus> {
 // Write the two audit rows, stamp the pull, and close the job. Called once the
 // last variation batch lands (or immediately if there were no variation rows).
 async function finalizePullJob(job: PullJob): Promise<void> {
+  // A Stop that lands between the last chunk and here must not produce a
+  // "COMPLETED" pair of audit rows for a pull that was abandoned. updatePullJob
+  // already refuses to write a cancelled job, but the log rows and the last-pull
+  // stamp go through their own writers, so check before any of it.
+  if (job.status === 'CANCELLED' || (await getPullJobStatus(job.id)) === 'CANCELLED') return
   // Rows the start-of-pull diff proved identical never reached the importers;
   // they are skips all the same, and the audit log should say so.
   await writeSyncLog({
@@ -169,6 +174,9 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       let updated = job.varUpdated
       let errors = job.varErrors ?? []
       while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+        // Stop pressed since the step began? Leave the cursor where it is and get
+        // out - the rows already imported stay, the rest are simply never fed in.
+        if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
         const chunk = dataRows.slice(cursor, cursor + VAR_ROW_CHUNK)
         // The importer re-derives options/variants from the DB per call, so feeding
         // it header + a slice of rows is correct even when a parent's rows straddle

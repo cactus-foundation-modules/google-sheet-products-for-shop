@@ -295,9 +295,14 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
   const [status, setStatus] = useState<PullStatus | null>(resumable)
   const [pulling, setPulling] = useState(false)
   const [starting, setStarting] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const pullJobId = useRef<string | null>(resumable?.pullJobId ?? null)
   const pollRef = useRef<number | null>(null)
   const looping = useRef(false)
+  // Set the moment Stop is pressed. The step loop checks it before starting
+  // another step, so the browser stops asking for work even while the request
+  // already in flight is still finishing its current batch on the server.
+  const stopRequested = useRef(false)
 
   const stopPolling = useCallback(() => {
     if (pollRef.current != null) { window.clearInterval(pollRef.current); pollRef.current = null }
@@ -328,13 +333,14 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
     let lastProgress: string | null = null
     try {
       for (;;) {
+        if (stopRequested.current) break
         let failReason: string | null = null
         try {
           const r = await fetch(`${BASE}/pull/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pullJobId: jobId }) })
           const j = await r.json().catch(() => null)
           if (r.ok && j?.status) {
             setStatus(j.status)
-            if (j.status.done) break
+            if (j.status.done || j.status.status === 'CANCELLED') break
             const progress = progressOf(j.status)
             if (progress !== lastProgress) { lastProgress = progress; retries = 0 }
             if (j.status.status !== 'FAILED') continue
@@ -423,24 +429,55 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
     if (jobId) await runSteps(jobId)
   }
 
-  async function cancelPull() {
+  // Abandon the job on the server and stop the browser's step loop. Shared by the
+  // "Cancel pull" on a paused or failed job and the "Stop pull" on a running one.
+  // Returns the snapshot the server had at the moment it was cancelled.
+  const abandonPull = useCallback(async (): Promise<PullStatus | null> => {
     const jobId = pullJobId.current ?? status?.pullJobId
-    if (jobId) await fetch(`${BASE}/pull/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pullJobId: jobId }) }).catch(() => {})
+    stopRequested.current = true
+    stopPolling()
+    if (!jobId) return null
+    const body = await fetch(`${BASE}/pull/cancel`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pullJobId: jobId }),
+    }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
     onResumableChange(null)
+    return body?.status ?? null
+  }, [status, stopPolling, onResumableChange])
+
+  async function cancelPull() {
+    await abandonPull()
     onClose()
   }
 
+  // Stop a pull that is running right now. The dialog stays open on the tally so
+  // the owner can see what did land before they close it - a stop mid-catalogue
+  // leaves the shop half-updated, which is worth showing rather than hiding.
+  async function stopPull() {
+    if (!confirm('Stop this pull?\n\nEverything already updated stays as it is - the rest of your sheet just will not be applied. You can pull again whenever you like.')) return
+    setStopping(true)
+    const snapshot = await abandonPull()
+    setStopping(false)
+    setStatus((prev) => snapshot ?? (prev ? { ...prev, status: 'CANCELLED' } : prev))
+  }
+
   // ---- render ----
-  const title = status ? 'Pulling from your sheet' : 'Pull from sheet'
+  const title = status?.status === 'CANCELLED' ? 'Pull stopped' : status ? 'Pulling from your sheet' : 'Pull from sheet'
 
   // Progress / result view (once a job exists).
   if (status) {
     const c = status.counts
     const failed = status.status === 'FAILED'
+    const cancelled = status.status === 'CANCELLED'
     return (
       <Modal title={title} onClose={onClose}>
         {status.done ? (
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Pull complete.</p>
+        ) : cancelled && pulling ? (
+          <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Stopping - finishing the batch already under way…</p>
+        ) : cancelled ? (
+          <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>
+            Pull stopped. Everything below already went through and stays as it is; the rest of the sheet was left alone.
+          </p>
         ) : failed && pulling ? (
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Hit a snag - retrying automatically…</p>
         ) : failed ? (
@@ -451,7 +488,7 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>{PHASE_LABEL[status.phase]}</p>
         )}
 
-        {!status.done && <PhaseTracker phase={status.phase} />}
+        {!status.done && !cancelled && <PhaseTracker phase={status.phase} />}
 
         <ProgressRow label="Products" done={status.productsDone} total={status.productsTotal} />
         <ProgressRow label="Variations" done={status.variationsDone} total={status.variationsTotal} />
@@ -471,16 +508,29 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
 
         {loadErr && <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem', marginTop: '0.5rem' }}>{loadErr}</p>}
 
-        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem' }}>
-          {status.done ? (
+        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          {status.done || (cancelled && !pulling) ? (
             <button type="button" className="btn btn-primary btn-sm" onClick={onClose}>Close</button>
-          ) : failed || !pulling ? (
+          ) : cancelled ? (
+            <span style={muted}>Stopping… this dialog will settle in a moment.</span>
+          ) : pulling ? (
+            // Running, including the automatic retry after a failed batch - a pull
+            // stuck in that retry loop is exactly when someone most wants out.
             <>
-              <button type="button" className="btn btn-primary btn-sm" onClick={continuePull} disabled={pulling}>{pulling ? 'Working…' : 'Continue'}</button>
-              <button type="button" className="btn btn-secondary btn-sm" onClick={cancelPull} disabled={pulling}>Cancel pull</button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={stopPull} disabled={stopping}>
+                {stopping ? 'Stopping…' : 'Stop pull'}
+              </button>
+              <span style={muted}>
+                {failed
+                  ? 'Retrying… stop it if you would rather not wait.'
+                  : 'Working… you can leave this open. Closing the tab pauses it - reopen and Continue.'}
+              </span>
             </>
           ) : (
-            <span style={muted}>Working… you can leave this open. Closing the tab pauses it - reopen and Continue.</span>
+            <>
+              <button type="button" className="btn btn-primary btn-sm" onClick={continuePull}>Continue</button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={cancelPull}>Cancel pull</button>
+            </>
           )}
         </div>
       </Modal>

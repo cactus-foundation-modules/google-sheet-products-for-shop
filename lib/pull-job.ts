@@ -92,6 +92,14 @@ export async function getLatestUnfinishedPullJob(): Promise<PullJob | null> {
   return rows[0] ? mapJob(rows[0]) : null
 }
 
+// Just the status column. The variations loop reads this between chunks so a
+// Stop pressed mid-run takes effect at the next chunk boundary rather than after
+// the whole step's time budget - one tiny query per 25 rows.
+export async function getPullJobStatus(id: string): Promise<PullJobStatus | null> {
+  const rows = await prisma.$queryRaw<{ status: PullJobStatus }[]>`SELECT "status" FROM "gsp_pull_job" WHERE "id" = ${id} LIMIT 1`
+  return rows[0]?.status ?? null
+}
+
 export type PullJobUpdate = {
   status?: PullJobStatus
   phase?: PullPhase
@@ -127,7 +135,10 @@ export async function updatePullJob(id: string, fields: PullJobUpdate): Promise<
   if (fields.varErrors !== undefined) sets.push(Prisma.sql`"var_errors" = ${fields.varErrors.length ? JSON.stringify(fields.varErrors) : null}::jsonb`)
   if (fields.error !== undefined) sets.push(Prisma.sql`"error" = ${fields.error}`)
   if (fields.clearGrids) sets.push(Prisma.sql`"products_grid" = NULL`, Prisma.sql`"variations_grid" = NULL`, Prisma.sql`"deletion_plan" = NULL`)
-  await prisma.$executeRaw`UPDATE "gsp_pull_job" SET ${Prisma.join(sets, ', ')} WHERE "id" = ${id}`
+  // Never write to a cancelled job. A Stop lands while a step is mid-flight, and
+  // that step's remaining writes would otherwise put the row back to RUNNING (or
+  // FAILED) and the job would offer Continue again after the owner stopped it.
+  await prisma.$executeRaw`UPDATE "gsp_pull_job" SET ${Prisma.join(sets, ', ')} WHERE "id" = ${id} AND "status" <> 'CANCELLED'`
 }
 
 export async function cancelPullJob(id: string): Promise<void> {
