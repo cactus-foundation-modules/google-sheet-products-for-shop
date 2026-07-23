@@ -27,6 +27,7 @@ function mapJob(r: Record<string, unknown>): PullJob {
     shopImportJobId: (r.shop_import_job_id as string | null) ?? null,
     detected: (r.detected as PullDetected | null) ?? null,
     productsTotal: r.products_total as number,
+    productsDone: (r.products_done as number | undefined) ?? 0,
     variationsTotal: r.variations_total as number,
     variationsDone: r.variations_done as number,
     prodCreated: r.prod_created as number,
@@ -103,6 +104,7 @@ export async function getPullJobStatus(id: string): Promise<PullJobStatus | null
 export type PullJobUpdate = {
   status?: PullJobStatus
   phase?: PullPhase
+  productsDone?: number
   variationsDone?: number
   prodCreated?: number
   prodUpdated?: number
@@ -123,6 +125,7 @@ export async function updatePullJob(id: string, fields: PullJobUpdate): Promise<
   const sets: Prisma.Sql[] = [Prisma.sql`"updated_at" = CURRENT_TIMESTAMP`]
   if (fields.status !== undefined) sets.push(Prisma.sql`"status" = ${fields.status}`)
   if (fields.phase !== undefined) sets.push(Prisma.sql`"phase" = ${fields.phase}`)
+  if (fields.productsDone !== undefined) sets.push(Prisma.sql`"products_done" = ${fields.productsDone}`)
   if (fields.variationsDone !== undefined) sets.push(Prisma.sql`"variations_done" = ${fields.variationsDone}`)
   if (fields.prodCreated !== undefined) sets.push(Prisma.sql`"prod_created" = ${fields.prodCreated}`)
   if (fields.prodUpdated !== undefined) sets.push(Prisma.sql`"prod_updated" = ${fields.prodUpdated}`)

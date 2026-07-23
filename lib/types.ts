@@ -75,6 +75,7 @@ export type PullJob = {
   shopImportJobId: string | null
   detected: PullDetected | null
   productsTotal: number
+  productsDone: number
   variationsTotal: number
   variationsDone: number
   prodCreated: number

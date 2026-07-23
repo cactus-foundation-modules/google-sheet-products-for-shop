@@ -1,5 +1,5 @@
 import { processImportJob } from '@/modules/shop/lib/import-engine'
-import { getImportJobById } from '@/modules/shop/lib/db/import-jobs'
+import { getImportJobById, updateImportJobProgress } from '@/modules/shop/lib/db/import-jobs'
 import { importVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { gridToImportCsv } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { applyStatusPass } from '@/modules/google-sheet-products-for-shop/lib/status-pass'
@@ -13,31 +13,38 @@ import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-sh
 
 // How many variation rows land in one importer call. Each call carries a fixed
 // per-parent cost (load the parent, its variants, their fields, its options and
-// images once), so a bigger chunk amortises that over more rows. It stayed at 10
-// only because every row used to re-read its child to check for changes; now that
-// the importer diffs a pre-loaded field map in memory and flushes its writes
-// together, 25 rows finish comfortably inside the dispatcher's 60s ceiling. The
-// cursor still advances after every chunk, so a killed step re-does at most one
-// chunk of idempotent no-ops - never the whole batch that once wedged a Pull.
-const VAR_ROW_CHUNK = 25
+// images once), so a bigger chunk amortises that over more rows - and a parent
+// whose rows straddle a chunk boundary pays that cost twice, so fewer, bigger
+// chunks also mean fewer straddles. It stayed at 10 only because every row used
+// to re-read its child to check for changes; now that the importer diffs a
+// pre-loaded field map in memory and flushes its writes together, 50 rows finish
+// comfortably inside the dispatcher's 60s ceiling. The cursor still advances
+// after every chunk, so a killed step re-does at most one chunk of idempotent
+// no-ops - never the whole batch that once wedged a Pull.
+const VAR_ROW_CHUNK = 50
+
+// How many product rows go through shop's import engine per call. Products used
+// to run as ONE unbounded call over the whole filtered grid: a big enough
+// changed-row count blew the dispatcher's 60s ceiling, the platform killed the
+// request before the phase could advance, the next step started the import over,
+// and the Pull sat on "Updating products…" forever. Chunked, every chunk banks
+// its cursor (products_done) and a step ends at the time budget like variations.
+const PROD_ROW_CHUNK = 25
 
 // How long one /pull/step keeps starting new chunks. Well under the module
 // dispatcher's 60s ceiling so the slowest single chunk still finishes and gets
 // its cursor write in before the platform kills the request.
 const STEP_TIME_BUDGET_MS = 35_000
 
-// Live products progress comes from the shop import job's own processed_rows,
-// which processImportJob updates every 25 rows as it runs. Once the products
-// phase is behind us, products are simply all done.
-async function productsDoneFor(job: PullJob): Promise<number> {
-  if (job.phase !== 'PRODUCTS') return job.productsTotal
-  if (!job.shopImportJobId) return 0
-  const sj = await getImportJobById(job.shopImportJobId)
-  return sj?.processedRows ?? 0
+// Live products progress is the job's own cursor, written after every chunk -
+// no extra read of the shop import job per status poll. Once the products phase
+// is behind us, products are simply all done.
+function productsDoneFor(job: PullJob): number {
+  return job.phase === 'PRODUCTS' ? job.productsDone : job.productsTotal
 }
 
 export async function pullStatus(job: PullJob): Promise<PullStatus> {
-  const productsDone = await productsDoneFor(job)
+  const productsDone = productsDoneFor(job)
   return {
     pullJobId: job.id,
     status: job.status,
@@ -127,18 +134,48 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
   try {
     if (job.phase === 'PRODUCTS') {
       if (!job.productsGrid || !job.shopImportJobId) throw new Error('Pull job is missing its products snapshot.')
-      // Products go through shop's own engine in one blocking step; the browser
-      // reads live "X of Y" from the shop import job while this runs. notify:false
-      // keeps a Pull from firing shop's import-complete email.
-      await processImportJob(job.shopImportJobId, gridToImportCsv(job.productsGrid), adminEmail, null, { notify: false })
-      const sj = await getImportJobById(job.shopImportJobId)
-      await updatePullJob(jobId, {
-        phase: 'DELETIONS', status: 'RUNNING', error: null,
-        prodCreated: sj?.createdCount ?? 0,
-        prodUpdated: sj?.updatedCount ?? 0,
-        prodSkipped: sj?.skippedCount ?? 0,
-        prodErrors: sj?.errors ?? [],
-      })
+      const header = job.productsGrid[0] ?? []
+      const dataRows = job.productsGrid.slice(1)
+      const stepStartedAt = Date.now()
+      // Bounded chunks through shop's engine, cursor banked after every one -
+      // the exact shape of the variations phase, and for the same reason: one
+      // unbounded call over a big grid died at the dispatcher's 60s ceiling
+      // before it could advance the phase, and every retry started over.
+      // notify:false keeps a Pull from firing shop's import-complete email.
+      let cursor = job.productsDone
+      let created = job.prodCreated
+      let updated = job.prodUpdated
+      let skipped = job.prodSkipped
+      let errors = job.prodErrors ?? []
+      while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+        // Stop pressed since the step began? Leave the cursor where it is and
+        // get out - rows already imported stay, the rest are never fed in.
+        if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
+        const chunk = dataRows.slice(cursor, cursor + PROD_ROW_CHUNK)
+        // The engine matches by SKU/slug and diffs before writing, so feeding it
+        // header + a slice is idempotent: a re-run chunk is all no-ops.
+        await processImportJob(job.shopImportJobId, gridToImportCsv([header, ...chunk]), adminEmail, null, { notify: false })
+        const sj = await getImportJobById(job.shopImportJobId)
+        // The engine numbers rows within the chunk it was handed (data row i is
+        // reported as i + 2); shift by the cursor to point at the grid row.
+        const chunkErrors = (sj?.errors ?? []).map((e) => ({ row: cursor + e.row, reason: e.reason }))
+        created += sj?.createdCount ?? 0
+        updated += sj?.updatedCount ?? 0
+        skipped += sj?.skippedCount ?? 0
+        errors = [...errors, ...chunkErrors]
+        cursor += chunk.length
+        // The shop job row carried per-chunk figures from the call above; put
+        // the running totals back so shop's own import listing reads true.
+        await updateImportJobProgress(job.shopImportJobId, { processedRows: cursor, createdCount: created, updatedCount: updated, skippedCount: skipped, errors })
+        await updatePullJob(jobId, {
+          status: 'RUNNING', error: null,
+          productsDone: cursor,
+          prodCreated: created, prodUpdated: updated, prodSkipped: skipped, prodErrors: errors,
+        })
+      }
+      if (cursor >= dataRows.length) {
+        await updatePullJob(jobId, { phase: 'DELETIONS', status: 'RUNNING', error: null })
+      }
     } else if (job.phase === 'DELETIONS') {
       if (!job.productsGrid || !job.variationsGrid) throw new Error('Pull job is missing its sheet snapshot.')
       // Status pass (the engine ignores the status column) over the stored grid -
