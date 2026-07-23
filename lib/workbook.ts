@@ -4,15 +4,21 @@ import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, addTab } from '
 // Variations importer needs the parent products to already exist (it will not
 // create parents) - the sync handlers enforce the same order in code.
 //
-// Supplier Catalogues is a one-way reference tab: Push writes it, Pull never
-// reads it. It sits after the two catalogue tabs and before the Read me.
+// Suppliers is a one-way reference tab: Push writes it, Pull never reads it. It
+// sits after the two catalogue tabs and before the Read me.
 export const TAB = {
   PRODUCTS: 'Products',
   VARIATIONS: 'Variations',
-  SUPPLIER_CATALOGUES: 'Supplier Catalogues',
+  SUPPLIERS: 'Suppliers',
   README: 'Read me',
 } as const
-export const TAB_ORDER: string[] = [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIER_CATALOGUES, TAB.README]
+export const TAB_ORDER: string[] = [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIERS, TAB.README]
+
+// The Suppliers tab was first shipped as "Supplier Catalogues". Workbooks created
+// under the old name are renamed in place on the next Push (see ensureSuppliersTab)
+// so their data, formatting and any owner formulas carry across rather than being
+// stranded on a tab beside a fresh, blank one.
+const LEGACY_SUPPLIERS_TAB_TITLE = 'Supplier Catalogues'
 
 // Static guidance. Never parsed - the parser only ever touches Products and
 // Variations. Written as one cell per line down column A.
@@ -28,9 +34,9 @@ function readmeRows(): string[][] {
     ['- "Pull from sheet" in the admin overwrites your website with this sheet, after showing you a preview first.'],
     ['- Editing cells here does NOTHING until you press Pull. Nothing here reaches your site on its own.'],
     [''],
-    ['THE SUPPLIER CATALOGUES TAB'],
-    ['- A read-only list of your suppliers and the catalogues you have recorded against each one, refreshed on every Push.'],
-    ['- Pull never reads it, so editing it changes nothing on your website. Add and edit catalogues under Shop, Suppliers.'],
+    ['THE SUPPLIERS TAB'],
+    ['- A read-only list of your suppliers, their discount and the catalogues you have recorded against each one, refreshed on every Push.'],
+    ['- Pull never reads it, so editing it changes nothing on your website. Add and edit suppliers and catalogues under Shop, Suppliers.'],
     [''],
     ['ORDER MATTERS'],
     ['- The Products tab is always synced before the Variations tab, in both directions.'],
@@ -115,10 +121,10 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
   await writeGrid(created.spreadsheetId, TAB.README, readmeRows())
 
   const requests: unknown[] = []
-  for (const tab of [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIER_CATALOGUES]) {
+  for (const tab of [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIERS]) {
     const sheetId = created.sheetIds[tab]
     if (sheetId === undefined) continue
-    const note = tab === TAB.SUPPLIER_CATALOGUES ? REFERENCE_HEADER_NOTE : SYNCED_HEADER_NOTE
+    const note = tab === TAB.SUPPLIERS ? REFERENCE_HEADER_NOTE : SYNCED_HEADER_NOTE
     requests.push(...headerFormattingRequests(sheetId, note))
   }
   await batchUpdate(created.spreadsheetId, requests)
@@ -127,17 +133,33 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
 }
 
 /**
- * Make sure the Supplier Catalogues tab exists, formatting it on the way in.
+ * Make sure the Suppliers tab exists, formatting it on the way in.
  *
- * Every workbook created before this tab existed is missing it, and a Push that
- * simply wrote to the title would fail on those. Creating it here means the tab
- * arrives on the owner's next Push with no action from them. A no-op once the
- * tab is there, which is every Push after the first.
+ * Three cases, in order:
+ *   - The tab is already there under its current name: nothing to do (every Push
+ *     after the first).
+ *   - It is there under its old name, "Supplier Catalogues": rename it in place so
+ *     the data, header formatting and any owner formulas move with it. A Push that
+ *     simply wrote to the new title would instead leave the old tab stranded and
+ *     start a blank one.
+ *   - It was never there (workbook predates the tab): add and format it. The tab
+ *     arrives on the owner's next Push with no action from them.
  */
-export async function ensureSupplierCataloguesTab(spreadsheetId: string): Promise<void> {
+export async function ensureSuppliersTab(spreadsheetId: string): Promise<void> {
+  const sheetIds = await getSheetIds(spreadsheetId)
+  if (sheetIds[TAB.SUPPLIERS] !== undefined) return
+
+  const legacyId = sheetIds[LEGACY_SUPPLIERS_TAB_TITLE]
+  if (legacyId !== undefined) {
+    await batchUpdate(spreadsheetId, [
+      { updateSheetProperties: { properties: { sheetId: legacyId, title: TAB.SUPPLIERS }, fields: 'title' } },
+    ])
+    return
+  }
+
   // Index 2 puts it after Products and Variations on workbooks that have the
   // original three tabs; Google clamps an out-of-range index to the end.
-  const sheetId = await addTab(spreadsheetId, TAB.SUPPLIER_CATALOGUES, 2)
+  const sheetId = await addTab(spreadsheetId, TAB.SUPPLIERS, 2)
   if (sheetId === null) return
   await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, REFERENCE_HEADER_NOTE))
 }

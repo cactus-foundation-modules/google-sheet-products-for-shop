@@ -132,11 +132,11 @@ export function GoogleSheetProductsToolbar() {
     const kept = typeof body.formulasKept === 'number' && body.formulasKept > 0
       ? ` ${body.formulasKept} formula(s) kept.`
       : ''
-    const catalogues = typeof body.supplierCatalogues === 'number' && body.supplierCatalogues > 0
-      ? ' Supplier catalogues refreshed.'
+    const suppliers = typeof body.suppliers === 'number' && body.suppliers > 0
+      ? ' Suppliers refreshed.'
       : ''
     setToast(res.ok
-      ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.${catalogues}${kept}`
+      ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.${suppliers}${kept}`
       : failureText(res, body, 'Push failed.'))
   }
 

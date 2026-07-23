@@ -5,7 +5,7 @@ import { errorResponse } from '@/lib/utils'
 import { getConnection, stampLastPush } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { pushProductsTab } from '@/modules/google-sheet-products-for-shop/lib/push-products'
 import { pushVariationsTab } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
-import { pushSupplierCataloguesTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
+import { pushSuppliersTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
 import { getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
     const variations = await pushVariationsTab(conn.spreadsheetId)
     // Reference tab, written last: it is nobody's dependency, so a failure here
     // cannot leave the two catalogue tabs half-synced.
-    const supplierCatalogues = await pushSupplierCataloguesTab(conn.spreadsheetId)
+    const suppliers = await pushSuppliersTab(conn.spreadsheetId)
     await stampLastPush()
 
     await writeSyncLog({ direction: 'PUSH', tab: 'PRODUCTS', status: 'COMPLETED', updatedCount: products.rowCount, runBy: user.id })
@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
       ok: true,
       products: products.rowCount,
       variations: variations.rowCount,
-      supplierCatalogues: supplierCatalogues.rowCount,
+      suppliers: suppliers.rowCount,
       // Formulas the owner had typed into catalogue cells that still agree with
       // the database, and so were written back rather than flattened to values.
       formulasKept: products.preservedFormulas + variations.preservedFormulas,
