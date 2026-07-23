@@ -242,6 +242,26 @@ export async function getSheetIds(spreadsheetId: string): Promise<Record<string,
   return ids
 }
 
+// Add one tab to an existing workbook and return its sheetId. Used for tabs
+// introduced after a workbook was created: every install made before the tab
+// existed still has to grow one, and nobody is going to recreate their sheet for
+// it. Returns null when the tab is already there.
+export async function addTab(spreadsheetId: string, title: string, index?: number): Promise<number | null> {
+  const existing = await getSheetIds(spreadsheetId)
+  if (existing[title] !== undefined) return null
+  const res = await ok(
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [{ addSheet: { properties: { title, ...(index === undefined ? {} : { index }) } } }],
+      }),
+    }),
+    'add tab'
+  )
+  const data = (await res.json()) as { replies?: Array<{ addSheet?: { properties?: { sheetId?: number } } }> }
+  return data.replies?.[0]?.addSheet?.properties?.sheetId ?? null
+}
+
 // spreadsheets.batchUpdate - formatting and protection.
 export async function batchUpdate(spreadsheetId: string, requests: unknown[]): Promise<void> {
   if (requests.length === 0) return

@@ -1,10 +1,18 @@
-import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, addTab } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
-// The three tabs, in order. Products MUST come before Variations because the
+// The four tabs, in order. Products MUST come before Variations because the
 // Variations importer needs the parent products to already exist (it will not
 // create parents) - the sync handlers enforce the same order in code.
-export const TAB = { PRODUCTS: 'Products', VARIATIONS: 'Variations', README: 'Read me' } as const
-export const TAB_ORDER: string[] = [TAB.PRODUCTS, TAB.VARIATIONS, TAB.README]
+//
+// Supplier Catalogues is a one-way reference tab: Push writes it, Pull never
+// reads it. It sits after the two catalogue tabs and before the Read me.
+export const TAB = {
+  PRODUCTS: 'Products',
+  VARIATIONS: 'Variations',
+  SUPPLIER_CATALOGUES: 'Supplier Catalogues',
+  README: 'Read me',
+} as const
+export const TAB_ORDER: string[] = [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIER_CATALOGUES, TAB.README]
 
 // Static guidance. Never parsed - the parser only ever touches Products and
 // Variations. Written as one cell per line down column A.
@@ -19,6 +27,10 @@ function readmeRows(): string[][] {
     ['- "Push to sheet" in the admin overwrites this sheet with what is on your website.'],
     ['- "Pull from sheet" in the admin overwrites your website with this sheet, after showing you a preview first.'],
     ['- Editing cells here does NOTHING until you press Pull. Nothing here reaches your site on its own.'],
+    [''],
+    ['THE SUPPLIER CATALOGUES TAB'],
+    ['- A read-only list of your suppliers and the catalogues you have recorded against each one, refreshed on every Push.'],
+    ['- Pull never reads it, so editing it changes nothing on your website. Add and edit catalogues under Shop, Suppliers.'],
     [''],
     ['ORDER MATTERS'],
     ['- The Products tab is always synced before the Variations tab, in both directions.'],
@@ -50,6 +62,51 @@ function readmeRows(): string[][] {
   ]
 }
 
+// Freeze, bold and protect the header row of one tab, and give its columns a
+// sensible starting width. Sheet/cell properties, so they outlive every value
+// rewrite a Push does - Push never needs to re-format.
+function headerFormattingRequests(sheetId: number, protectionNote: string): unknown[] {
+  return [
+    // Freeze the header row.
+    {
+      updateSheetProperties: {
+        properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+        fields: 'gridProperties.frozenRowCount',
+      },
+    },
+    // Bold the header row.
+    {
+      repeatCell: {
+        range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+        cell: { userEnteredFormat: { textFormat: { bold: true } } },
+        fields: 'userEnteredFormat.textFormat.bold',
+      },
+    },
+    // Protect the header row - warning only, so the owner can still unprotect it
+    // if they genuinely need to, but is nudged before mangling it by accident.
+    {
+      addProtectedRange: {
+        protectedRange: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+          warningOnly: true,
+          description: protectionNote,
+        },
+      },
+    },
+    // Sensible starting column widths across the used range (harmless on unused).
+    {
+      updateDimensionProperties: {
+        range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 45 },
+        properties: { pixelSize: 160 },
+        fields: 'pixelSize',
+      },
+    },
+  ]
+}
+
+const SYNCED_HEADER_NOTE = 'Header row - Pull relies on these column names. Edit with care.'
+const REFERENCE_HEADER_NOTE = 'Header row - this tab is rewritten on every Push and never read back.'
+
 // Create the workbook, write the Read me tab, and apply all formatting ONCE.
 // The header formatting (freeze, bold, protection) is a sheet/cell property, so
 // it outlives the value rewrites a Push does - Push never needs to re-format.
@@ -58,47 +115,31 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
   await writeGrid(created.spreadsheetId, TAB.README, readmeRows())
 
   const requests: unknown[] = []
-  for (const tab of [TAB.PRODUCTS, TAB.VARIATIONS]) {
+  for (const tab of [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIER_CATALOGUES]) {
     const sheetId = created.sheetIds[tab]
     if (sheetId === undefined) continue
-    // Freeze the header row.
-    requests.push({
-      updateSheetProperties: {
-        properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
-        fields: 'gridProperties.frozenRowCount',
-      },
-    })
-    // Bold the header row.
-    requests.push({
-      repeatCell: {
-        range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
-        cell: { userEnteredFormat: { textFormat: { bold: true } } },
-        fields: 'userEnteredFormat.textFormat.bold',
-      },
-    })
-    // Protect the header row - warning only, so the owner can still unprotect it
-    // if they genuinely need to, but is nudged before mangling it by accident.
-    requests.push({
-      addProtectedRange: {
-        protectedRange: {
-          range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
-          warningOnly: true,
-          description: 'Header row - Pull relies on these column names. Edit with care.',
-        },
-      },
-    })
-    // Sensible starting column widths across the used range (harmless on unused).
-    requests.push({
-      updateDimensionProperties: {
-        range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 45 },
-        properties: { pixelSize: 160 },
-        fields: 'pixelSize',
-      },
-    })
+    const note = tab === TAB.SUPPLIER_CATALOGUES ? REFERENCE_HEADER_NOTE : SYNCED_HEADER_NOTE
+    requests.push(...headerFormattingRequests(sheetId, note))
   }
   await batchUpdate(created.spreadsheetId, requests)
 
   return { spreadsheetId: created.spreadsheetId, spreadsheetUrl: created.spreadsheetUrl }
+}
+
+/**
+ * Make sure the Supplier Catalogues tab exists, formatting it on the way in.
+ *
+ * Every workbook created before this tab existed is missing it, and a Push that
+ * simply wrote to the title would fail on those. Creating it here means the tab
+ * arrives on the owner's next Push with no action from them. A no-op once the
+ * tab is there, which is every Push after the first.
+ */
+export async function ensureSupplierCataloguesTab(spreadsheetId: string): Promise<void> {
+  // Index 2 puts it after Products and Variations on workbooks that have the
+  // original three tabs; Google clamps an out-of-range index to the end.
+  const sheetId = await addTab(spreadsheetId, TAB.SUPPLIER_CATALOGUES, 2)
+  if (sheetId === null) return
+  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, REFERENCE_HEADER_NOTE))
 }
 
 // The in-sheet dropdowns that stop the typo class the import would reject anyway,
