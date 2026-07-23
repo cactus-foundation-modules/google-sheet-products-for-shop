@@ -44,9 +44,22 @@ describe('valuesMatch', () => {
     expect(valuesMatch(' Blue Chair ', 'Blue Chair')).toBe(true)
     expect(valuesMatch('Blue chair', 'Blue Chair')).toBe(false)
     // Leading zeros are meaningful in a barcode, so "0100" is not 100 - which is
-    // why text is never compared as a number.
+    // why a non-canonical numeric string is never compared as a number.
     expect(valuesMatch('100', '0100')).toBe(false)
     expect(valuesMatch('100', '100.0')).toBe(false)
+  })
+
+  it('matches a canonical numeric STRING against a formula result, with tolerance', () => {
+    // An open-ended column (a custom attribute) carries a plain number that reached
+    // the grid as text. A formula whose result equals it must still be preserved,
+    // float noise and all - otherwise it is replaced on every Push though nothing
+    // changed.
+    expect(valuesMatch('15', '15')).toBe(true)
+    expect(valuesMatch('15.000000000000002', '15')).toBe(true)
+    expect(valuesMatch('15', '15.5')).toBe(false)
+    // A non-canonical string still falls through to an exact text compare.
+    expect(valuesMatch('100', '0100')).toBe(false)
+    expect(valuesMatch('0100', '0100')).toBe(true)
   })
 })
 
@@ -54,6 +67,14 @@ describe('planFormulaPreservation', () => {
   it('keeps a formula whose result matches the database', () => {
     const oldGrid = [oldHeader, [v('A1'), v('chair'), v('Chair'), f('=D2*1.2', 15)]]
     const newGrid: CellValue[][] = [HEADER, ['A1', 'chair', 'Chair', 15]]
+    expect(plan(oldGrid, newGrid)).toEqual([{ row: 1, col: 3, formula: '=D2*1.2' }])
+  })
+
+  it('keeps a formula over a column whose value is a numeric STRING', () => {
+    // A custom attribute pushed as text: the formula result equals it, so it
+    // survives rather than reverting to a plain value on this Push.
+    const oldGrid = [oldHeader, [v('A1'), v('chair'), v('Chair'), f('=D2*1.2', 15)]]
+    const newGrid: CellValue[][] = [HEADER, ['A1', 'chair', 'Chair', '15']]
     expect(plan(oldGrid, newGrid)).toEqual([{ row: 1, col: 3, formula: '=D2*1.2' }])
   })
 

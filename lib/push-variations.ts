@@ -2,6 +2,7 @@ import { exportVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { parseCsv } from '@/modules/shop/lib/csv'
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
 // The variation columns that hold a number, not text. They go into the sheet as
@@ -32,14 +33,25 @@ export async function buildVariationsGrid(): Promise<CellValue[][]> {
   const guard = /[=+\-@\t\r]/
   const header = (grid[0] ?? []).map((h) => h.trim())
   const numeric = header.map((h) => NUMERIC_VARIATION_COLUMNS.has(h))
+  // A column this module and shop-variations do not own is an open-ended one: a
+  // custom attribute or another module's extra field. Its type is not fixed, so a
+  // numeric value in it must go in as a number rather than the string "100" (which
+  // Sheets stores as text, shows as '100, and which defeats formula preservation).
+  // The module's own identifier columns - SKU, Barcode, Variant ID, the option
+  // pairs - are NOT open: a SKU "100" has to stay text. See numeric-cell.ts.
+  const open = header.map((h, i) => !numeric[i] && !isFixedVariationColumn(h))
   return grid.map((row, r) =>
     row.map((cell, c) => {
       const unguarded = cell.length > 1 && cell[0] === "'" && guard.test(cell[1]!) ? cell.slice(1) : cell
-      // The header row and every text column stay strings. A blank numeric cell
-      // stays blank (a variant with no RRP is not one priced at zero).
-      if (r === 0 || !numeric[c] || unguarded === '') return unguarded
-      const n = Number(unguarded)
-      return Number.isNaN(n) ? unguarded : n
+      // The header row stays as typed. A blank numeric cell stays blank (a variant
+      // with no RRP is not one priced at zero).
+      if (r === 0 || unguarded === '') return unguarded
+      if (numeric[c]) {
+        const n = Number(unguarded)
+        return Number.isNaN(n) ? unguarded : n
+      }
+      if (open[c]) return coerceOpenCell(unguarded)
+      return unguarded
     })
   )
 }
@@ -52,6 +64,13 @@ const FIXED_VARIATION_COLUMNS: ReadonlySet<string> = new Set([
   'Parent Slug', 'Parent Name', 'Variant SKU', 'Price', 'Sale Price', 'RRP', 'Trade Price', 'Cost Price', 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image', 'Variant ID',
 ])
 const OPTION_PAIR = /^(Option|Value) \d+$/
+
+// A column whose type is fixed by this module or shop-variations - a price, an
+// identifier, an option pair. Everything else in the header is an open-ended
+// extra field whose numeric cells need coercing (see buildVariationsGrid).
+function isFixedVariationColumn(header: string): boolean {
+  return FIXED_VARIATION_COLUMNS.has(header) || OPTION_PAIR.test(header)
+}
 
 // A variant row is identified by its Variant ID (the stable child product id the
 // export writes), then by SKU where it has one, then by the parent slug plus its
@@ -70,6 +89,6 @@ export async function pushVariationsTab(spreadsheetId: string): Promise<{ rowCou
     tab: TAB.VARIATIONS,
     grid,
     keyStrategies: variationKeys((grid[0] ?? []).map(String)),
-    ownsColumn: (header) => FIXED_VARIATION_COLUMNS.has(header) || OPTION_PAIR.test(header),
+    ownsColumn: (header) => isFixedVariationColumn(header),
   })
 }

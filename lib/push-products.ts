@@ -3,6 +3,7 @@ import { buildProductCsvRows } from '@/modules/shop/lib/csv-rows'
 import { getProductsBySlugs } from '@/modules/shop/lib/db/products'
 import { resolveProductFieldProviders } from '@/modules/shop/lib/product-field-providers'
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
@@ -79,9 +80,13 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
     const productId = idBySlug.get(row.slug)
     const cols = productId ? colsByProduct.get(productId) ?? [] : []
     const values = productId ? valuesByProduct.get(productId) ?? {} : {}
+    // Attribute/extra-field columns have no fixed type: a numeric one must go in
+    // as a real number, not the string "100" (which Sheets stores as a text cell,
+    // shows as '100, and which defeats formula preservation). coerceOpenCell keeps
+    // a genuine code like "0100" as text - see numeric-cell.ts.
     const fieldCells: CellValue[] = fieldHeaderOrder.map((label) => {
       const col = cols.find((c) => c.label === label)
-      return col ? values[col.key] ?? '' : ''
+      return coerceOpenCell(col ? values[col.key] ?? '' : '')
     })
     grid.push([...base, ...fieldCells])
   }
