@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const products = await pushProductsTab(conn.spreadsheetId, conn.includeCostPrice)
+    const products = await pushProductsTab(conn.spreadsheetId)
     const variations = await pushVariationsTab(conn.spreadsheetId)
     // Reference tab, written last: it is nobody's dependency, so a failure here
     // cannot leave the two catalogue tabs half-synced.

@@ -139,13 +139,25 @@ function numCell(s: string): number | undefined {
 function variationRowChanged(
   v: VariantEditorRow,
   cols: string[],
-  col: { sku: number; price: number; stock: number; barcode: number; supplier: number; weight: number; image: number },
+  col: { sku: number; price: number; salePrice: number; rrp: number; tradePrice: number; costPrice: number; stock: number; barcode: number; supplier: number; weight: number; image: number },
 ): boolean {
   const cell = (i: number) => (cols[i] ?? '').trim()
   if (col.price >= 0) {
     const price = numCell(cell(col.price))
     if (price !== undefined && v.price !== price) return true
   }
+  // The optional price types: a blank cell means "cleared" (null), matching the
+  // importer, so an unset figure left blank in the sheet reads as unchanged.
+  const priceCellChanged = (colIndex: number, current: number | null): boolean => {
+    if (colIndex < 0) return false
+    const raw = cell(colIndex)
+    const next = raw === '' ? null : numCell(raw) ?? null
+    return next !== current
+  }
+  if (priceCellChanged(col.salePrice, v.salePrice)) return true
+  if (priceCellChanged(col.rrp, v.retailPrice)) return true
+  if (priceCellChanged(col.tradePrice, v.tradePrice)) return true
+  if (priceCellChanged(col.costPrice, v.costPrice)) return true
   if (col.sku >= 0 && (v.sku ?? null) !== (cell(col.sku) || null)) return true
   if (col.barcode >= 0 && (v.barcode ?? null) !== (cell(col.barcode) || null)) return true
   if (col.supplier >= 0 && (v.supplier ?? null) !== (cell(col.supplier) || null)) return true
@@ -201,7 +213,9 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     optionPairs.push({ nameCol, valueCol })
   }
   const fieldCol = {
-    sku: idx('Variant SKU'), price: idx('Price'), stock: idx('Stock'),
+    sku: idx('Variant SKU'), price: idx('Price'),
+    salePrice: idx('Sale Price'), rrp: idx('RRP'), tradePrice: idx('Trade Price'), costPrice: idx('Cost Price'),
+    stock: idx('Stock'),
     barcode: idx('Barcode'), supplier: idx('Supplier'), weight: idx('Weight'), image: idx('Image'),
   }
 

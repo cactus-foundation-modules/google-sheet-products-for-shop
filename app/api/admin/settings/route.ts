@@ -4,7 +4,7 @@ import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getSiteUrlOrNull } from '@/lib/config/env'
-import { getConnection, saveOAuthClient, setIncludeCostPrice } from '@/modules/google-sheet-products-for-shop/lib/db'
+import { getConnection, saveOAuthClient } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { buildGoogleRedirectUri } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
 
 export async function GET() {
@@ -22,7 +22,6 @@ export async function GET() {
     googleAccountEmail: conn?.googleAccountEmail ?? null,
     spreadsheetId: conn?.spreadsheetId ?? null,
     spreadsheetUrl: conn?.spreadsheetUrl ?? null,
-    includeCostPrice: conn?.includeCostPrice ?? true,
     lastPushAt: conn?.lastPushAt ?? null,
     lastPullAt: conn?.lastPullAt ?? null,
     // The two values the owner must paste into their Google OAuth client. The
@@ -36,7 +35,6 @@ export async function GET() {
 const Body = z.object({
   oauthClientId: z.string().min(1).optional(),
   oauthClientSecret: z.string().min(1).optional(),
-  includeCostPrice: z.boolean().optional(),
 })
 
 export async function PATCH(request: NextRequest) {
@@ -59,9 +57,6 @@ export async function PATCH(request: NextRequest) {
   }
   if (data.oauthClientId && data.oauthClientSecret) {
     await saveOAuthClient(data.oauthClientId, data.oauthClientSecret)
-  }
-  if (data.includeCostPrice !== undefined) {
-    await setIncludeCostPrice(data.includeCostPrice)
   }
 
   return NextResponse.json({ ok: true })

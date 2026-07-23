@@ -8,7 +8,6 @@ type Settings = {
   googleAccountEmail: string | null
   spreadsheetId: string | null
   spreadsheetUrl: string | null
-  includeCostPrice: boolean
   lastPushAt: string | null
   lastPullAt: string | null
   redirectUri: string | null
@@ -21,7 +20,6 @@ const EMPTY: Settings = {
   googleAccountEmail: null,
   spreadsheetId: null,
   spreadsheetUrl: null,
-  includeCostPrice: true,
   lastPushAt: null,
   lastPullAt: null,
   redirectUri: null,
@@ -122,15 +120,6 @@ export function GoogleSheetSettingsTab() {
     } else {
       setMessage((await res.json().catch(() => ({}))).error ?? 'Save failed.')
     }
-  }
-
-  async function toggleCostPrice(value: boolean) {
-    setSettings((s) => ({ ...s, includeCostPrice: value }))
-    await fetch(`${BASE}/settings`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ includeCostPrice: value }),
-    })
   }
 
   async function connect() {
@@ -256,13 +245,9 @@ export function GoogleSheetSettingsTab() {
       <div className="card">
         <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>The sheet</div>
 
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 400, marginBottom: '0.5rem' }}>
-          <input type="checkbox" checked={settings.includeCostPrice} onChange={(e) => toggleCostPrice(e.target.checked)} />
-          Include cost price
-        </label>
         <p style={{ ...muted, fontSize: '0.8125rem', marginBottom: '1rem' }}>
-          Cost price is your supplier cost (your margin). Anyone you share the sheet with can see it. Turn this
-          off and Push again to drop the column entirely.
+          The sheet carries every price you keep, cost price included. Cost price is your supplier cost (your
+          margin), so anyone you share the sheet with can see it - share it with that in mind.
         </p>
 
         {!settings.hasOAuthConnected ? (

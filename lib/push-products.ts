@@ -4,11 +4,11 @@ import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/she
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
-// The Products header, minus cost_price when the owner has hidden their margins.
-// Dropping the column (rather than blanking it) is deliberate: a blank column on
-// Pull would null every product's cost price; an absent column leaves it alone.
-export function productColumns(includeCostPrice: boolean): CsvColumn[] {
-  return CSV_COLUMNS.filter((c) => includeCostPrice || c !== 'cost_price')
+// The full Products header. Cost price is always included - the owner asked for
+// it to go every time rather than sit behind an on/off setting. It is a reference
+// figure like RRP and trade, and anyone the sheet is shared with can see it.
+export function productColumns(): CsvColumn[] {
+  return [...CSV_COLUMNS]
 }
 
 // Cells go into the sheet as the type they actually are. Writing a price as the
@@ -34,9 +34,9 @@ function typedCell(column: CsvColumn, value: string): CellValue {
 // directly rather than round-tripping through CSV text: the write is RAW, so
 // shop's formula-injection guard (which prefixes a leading apostrophe) is both
 // redundant and would show the owner a stray ' in their cells.
-export async function buildProductsGrid(includeCostPrice: boolean): Promise<CellValue[][]> {
+export async function buildProductsGrid(): Promise<CellValue[][]> {
   const rows = await buildProductCsvRows()
-  const columns = productColumns(includeCostPrice)
+  const columns = productColumns()
   const grid: CellValue[][] = [columns.map((c) => c as CellValue)]
   for (const row of rows) grid.push(columns.map((c) => typedCell(c, row[c] ?? '')))
   return grid
@@ -54,10 +54,9 @@ const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set(CSV_COLUMNS)
 // DB -> Products tab. Returns the number of product rows written (excl. header)
 // and how many of the owner's formulas survived.
 export async function pushProductsTab(
-  spreadsheetId: string,
-  includeCostPrice: boolean
+  spreadsheetId: string
 ): Promise<{ rowCount: number; preservedFormulas: number }> {
-  const grid = await buildProductsGrid(includeCostPrice)
+  const grid = await buildProductsGrid()
   const result = await pushGrid({
     spreadsheetId,
     tab: TAB.PRODUCTS,
@@ -66,8 +65,7 @@ export async function pushProductsTab(
     ownsColumn: (header) => PRODUCT_COLUMN_NAMES.has(header),
   })
   // Dropdowns for type/status/out_of_stock_behaviour and the recommendation
-  // modes, positioned for this exact column layout (cost_price may or may not
-  // be present).
-  await applyProductsValidation(spreadsheetId, productColumns(includeCostPrice))
+  // modes, positioned for the full column layout.
+  await applyProductsValidation(spreadsheetId, productColumns())
   return result
 }

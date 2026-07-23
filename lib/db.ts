@@ -19,7 +19,6 @@ function mapConnection(r: Record<string, unknown>): GspConnection {
     googleAccountEmail: (r.google_account_email as string | null) ?? null,
     spreadsheetId: (r.spreadsheet_id as string | null) ?? null,
     spreadsheetUrl: (r.spreadsheet_url as string | null) ?? null,
-    includeCostPrice: (r.include_cost_price as boolean | null) ?? true,
     lastPushAt: (r.last_push_at as Date | null) ?? null,
     lastPullAt: (r.last_pull_at as Date | null) ?? null,
   }
@@ -117,15 +116,6 @@ export async function clearTokens(): Promise<void> {
       "google_account_email" = NULL,
       "updated_at" = CURRENT_TIMESTAMP
     WHERE "id" = ${SINGLETON}
-  `
-}
-
-// --- Plain config ---------------------------------------------------------
-
-export async function setIncludeCostPrice(value: boolean): Promise<void> {
-  await ensureRow()
-  await prisma.$executeRaw`
-    UPDATE "gsp_connection" SET "include_cost_price" = ${value}, "updated_at" = CURRENT_TIMESTAMP WHERE "id" = ${SINGLETON}
   `
 }
 

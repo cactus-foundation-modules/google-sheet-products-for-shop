@@ -10,7 +10,6 @@ export type GspConnection = {
   googleAccountEmail: string | null
   spreadsheetId: string | null
   spreadsheetUrl: string | null
-  includeCostPrice: boolean
   lastPushAt: Date | null
   lastPullAt: Date | null
 }
