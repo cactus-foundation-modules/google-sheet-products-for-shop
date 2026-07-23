@@ -1,6 +1,7 @@
 import { CSV_COLUMNS, NUMERIC_CSV_COLUMNS, BOOLEAN_CSV_COLUMNS, type CsvColumn } from '@/modules/shop/lib/csv'
 import { buildProductCsvRows } from '@/modules/shop/lib/csv-rows'
-import { clearTab, writeGrid, type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
 // The Products header, minus cost_price when the owner has hidden their margins.
@@ -41,14 +42,32 @@ export async function buildProductsGrid(includeCostPrice: boolean): Promise<Cell
   return grid
 }
 
-// DB -> Products tab. Returns the number of product rows written (excl. header).
-export async function pushProductsTab(spreadsheetId: string, includeCostPrice: boolean): Promise<{ rowCount: number }> {
+// A product row is identified by SKU, falling back to slug when it has none -
+// the same order Pull matches a sheet row to a product in, so the two directions
+// agree on what "the same row" means.
+const PRODUCT_KEYS = [['sku'], ['slug']]
+
+// The Products header is a closed set, so a column beyond the pushed grid can be
+// told apart from one the owner added themselves with certainty.
+const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set(CSV_COLUMNS)
+
+// DB -> Products tab. Returns the number of product rows written (excl. header)
+// and how many of the owner's formulas survived.
+export async function pushProductsTab(
+  spreadsheetId: string,
+  includeCostPrice: boolean
+): Promise<{ rowCount: number; preservedFormulas: number }> {
   const grid = await buildProductsGrid(includeCostPrice)
-  await clearTab(spreadsheetId, TAB.PRODUCTS)
-  await writeGrid(spreadsheetId, TAB.PRODUCTS, grid)
+  const result = await pushGrid({
+    spreadsheetId,
+    tab: TAB.PRODUCTS,
+    grid,
+    keyStrategies: PRODUCT_KEYS,
+    ownsColumn: (header) => PRODUCT_COLUMN_NAMES.has(header),
+  })
   // Dropdowns for type/status/out_of_stock_behaviour and the recommendation
   // modes, positioned for this exact column layout (cost_price may or may not
   // be present).
   await applyProductsValidation(spreadsheetId, productColumns(includeCostPrice))
-  return { rowCount: Math.max(grid.length - 1, 0) }
+  return result
 }

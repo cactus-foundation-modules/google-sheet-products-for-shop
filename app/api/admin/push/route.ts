@@ -58,7 +58,14 @@ export async function POST(req: NextRequest) {
     await writeSyncLog({ direction: 'PUSH', tab: 'PRODUCTS', status: 'COMPLETED', updatedCount: products.rowCount, runBy: user.id })
     await writeSyncLog({ direction: 'PUSH', tab: 'VARIATIONS', status: 'COMPLETED', updatedCount: variations.rowCount, runBy: user.id })
 
-    return NextResponse.json({ ok: true, products: products.rowCount, variations: variations.rowCount })
+    return NextResponse.json({
+      ok: true,
+      products: products.rowCount,
+      variations: variations.rowCount,
+      // Formulas the owner had typed into catalogue cells that still agree with
+      // the database, and so were written back rather than flattened to values.
+      formulasKept: products.preservedFormulas + variations.preservedFormulas,
+    })
   } catch (err) {
     const message = err instanceof GoogleAuthError ? err.message : 'The push to Google Sheets failed. Please try again.'
     if (!(err instanceof GoogleAuthError)) {

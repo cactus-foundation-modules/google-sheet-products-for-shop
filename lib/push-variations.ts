@@ -1,6 +1,6 @@
 import { exportVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { parseCsv } from '@/modules/shop/lib/csv'
-import { clearTab, writeGrid } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
 // Variations are the one tab that goes DB -> text -> grid rather than being built
@@ -21,10 +21,32 @@ export async function buildVariationsGrid(): Promise<string[][]> {
   )
 }
 
-// DB -> Variations tab. Returns the number of variant rows written (excl. header).
-export async function pushVariationsTab(spreadsheetId: string): Promise<{ rowCount: number }> {
+// The Variations columns this module and shop-variations own between them.
+// Anything else in the header is either a field another module contributes (the
+// labels are arbitrary, so they cannot be listed here) or a column the owner
+// added. Both are left alone.
+const FIXED_VARIATION_COLUMNS: ReadonlySet<string> = new Set([
+  'Parent Slug', 'Parent Name', 'Variant SKU', 'Price', 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image',
+])
+const OPTION_PAIR = /^(Option|Value) \d+$/
+
+// A variant row is identified by its SKU where it has one. Where it does not,
+// the parent slug plus its full set of option values is what makes it unique -
+// the same pairing the Variations importer matches on.
+function variationKeys(header: string[]): string[][] {
+  const optionCols = header.filter((h) => OPTION_PAIR.test(h))
+  return [['Variant SKU'], ['Parent Slug', ...optionCols]]
+}
+
+// DB -> Variations tab. Returns the number of variant rows written (excl. header)
+// and how many of the owner's formulas survived.
+export async function pushVariationsTab(spreadsheetId: string): Promise<{ rowCount: number; preservedFormulas: number }> {
   const grid = await buildVariationsGrid()
-  await clearTab(spreadsheetId, TAB.VARIATIONS)
-  await writeGrid(spreadsheetId, TAB.VARIATIONS, grid)
-  return { rowCount: Math.max(grid.length - 1, 0) }
+  return pushGrid({
+    spreadsheetId,
+    tab: TAB.VARIATIONS,
+    grid,
+    keyStrategies: variationKeys(grid[0] ?? []),
+    ownsColumn: (header) => FIXED_VARIATION_COLUMNS.has(header) || OPTION_PAIR.test(header),
+  })
 }

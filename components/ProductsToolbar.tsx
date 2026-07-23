@@ -116,8 +116,11 @@ export function GoogleSheetProductsToolbar() {
       if (confirm(`${body.error}\n\nOverwrite the sheet anyway?`)) await push(true)
       return
     }
+    const kept = typeof body.formulasKept === 'number' && body.formulasKept > 0
+      ? ` ${body.formulasKept} formula(s) kept.`
+      : ''
     setToast(res.ok
-      ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.`
+      ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.${kept}`
       : (body.error ?? 'Push failed.'))
   }
 
