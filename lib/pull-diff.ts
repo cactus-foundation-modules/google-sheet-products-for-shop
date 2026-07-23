@@ -220,6 +220,7 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     stock: idx('Stock'),
     barcode: idx('Barcode'), supplier: idx('Supplier'), weight: idx('Weight'), image: idx('Image'),
   }
+  const idCol = idx('Variant ID')
 
   const allProviders = await resolveVariantFieldProviders()
   const providers = allProviders.filter((p) => typeof p.provider.rowChanged === 'function')
@@ -256,6 +257,7 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     const valueIdByKey = new Map<string, string>()
     for (const o of payload?.options ?? []) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
     const variantByKey = new Map((payload?.variants ?? []).map((v) => [[...v.optionValueIds].sort().join('|'), v]))
+    const variantByChildId = new Map((payload?.variants ?? []).map((v) => [v.childProductId, v]))
 
     // Preload each provider's current state for this parent's existing children,
     // exactly as the importer does, so rowChanged diffs in memory rather than
@@ -269,6 +271,11 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     }
 
     for (const gr of rows) {
+      // Stable identity first: a row carrying a Variant ID names an exact
+      // variant whatever its labels say. Renamed values used to read as brand
+      // new combinations here (kind 'create'), while the deletion planner
+      // offered the originals up for deletion - one rename, counted twice.
+      const byId = idCol >= 0 ? variantByChildId.get(((gr.cols[idCol] ?? '')).trim()) : undefined
       const ids: string[] = []
       let allResolvable = true
       for (const pair of optionPairs) {
@@ -279,9 +286,22 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
         if (!id) { allResolvable = false; break } // a new option/value = a new combination
         ids.push(id)
       }
-      if (!allResolvable) { results.push({ row: gr.row, kind: 'create' }); continue }
+      if (!allResolvable) {
+        // An id-matched row with unrecognisable labels is a rename/reassignment
+        // the importer will resolve in place - an update, never a create.
+        results.push(byId
+          ? { row: gr.row, kind: 'update', parentName: parent.name, label: byId.label }
+          : { row: gr.row, kind: 'create' })
+        continue
+      }
       if (ids.length === 0) { results.push({ row: gr.row, kind: 'error', reason: 'No options on this row' }); continue }
-      const existing = variantByKey.get([...ids].sort().join('|'))
+      // An id-matched row whose combination now belongs to a different variant is
+      // a reassignment - an update to that variant, handled by the importer.
+      if (byId && [...ids].sort().join('|') !== [...byId.optionValueIds].sort().join('|')) {
+        results.push({ row: gr.row, kind: 'update', parentName: parent.name, label: byId.label })
+        continue
+      }
+      const existing = byId ?? variantByKey.get([...ids].sort().join('|'))
       if (!existing) { results.push({ row: gr.row, kind: 'create' }); continue }
       if (variationRowChanged(existing, gr.cols, fieldCol)) { results.push({ row: gr.row, kind: 'update', parentName: parent.name, label: existing.label }); continue }
       if (undiffableProviders || (providers.length > 0 && await providerRowChanged(providers, parent.id, existing.childProductId, header, gr.cols, providerCtx))) {

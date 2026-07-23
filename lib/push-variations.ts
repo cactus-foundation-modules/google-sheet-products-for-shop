@@ -26,16 +26,16 @@ export async function buildVariationsGrid(): Promise<string[][]> {
 // labels are arbitrary, so they cannot be listed here) or a column the owner
 // added. Both are left alone.
 const FIXED_VARIATION_COLUMNS: ReadonlySet<string> = new Set([
-  'Parent Slug', 'Parent Name', 'Variant SKU', 'Price', 'Sale Price', 'RRP', 'Trade Price', 'Cost Price', 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image',
+  'Parent Slug', 'Parent Name', 'Variant SKU', 'Price', 'Sale Price', 'RRP', 'Trade Price', 'Cost Price', 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image', 'Variant ID',
 ])
 const OPTION_PAIR = /^(Option|Value) \d+$/
 
-// A variant row is identified by its SKU where it has one. Where it does not,
-// the parent slug plus its full set of option values is what makes it unique -
-// the same pairing the Variations importer matches on.
+// A variant row is identified by its Variant ID (the stable child product id the
+// export writes), then by SKU where it has one, then by the parent slug plus its
+// full set of option values - the same order the Variations importer matches in.
 function variationKeys(header: string[]): string[][] {
   const optionCols = header.filter((h) => OPTION_PAIR.test(h))
-  return [['Variant SKU'], ['Parent Slug', ...optionCols]]
+  return [['Variant ID'], ['Variant SKU'], ['Parent Slug', ...optionCols]]
 }
 
 // DB -> Variations tab. Returns the number of variant rows written (excl. header)

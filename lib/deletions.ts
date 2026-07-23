@@ -99,6 +99,19 @@ export async function planPullDeletions(
   const header = (variationsGrid[0] ?? []).map((h) => h.trim())
   const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
   const slugCol = idx('Parent Slug')
+  const idCol = idx('Variant ID')
+
+  // Every Variant ID (stable child product id) still present anywhere in the
+  // sheet. A variant listed here was NOT removed - however unrecognisable its
+  // option/value labels have become (a rename in the sheet used to read as
+  // "gone", and Pull offered to delete the lot). Identity beats labels.
+  const sheetChildIds = new Set<string>()
+  if (idCol >= 0) {
+    for (let r = 1; r < variationsGrid.length; r++) {
+      const id = ((variationsGrid[r] ?? [])[idCol] ?? '').trim()
+      if (id) sheetChildIds.add(id)
+    }
+  }
   const optionPairs: Array<{ nameCol: number; valueCol: number }> = []
   if (slugCol >= 0) {
     for (let i = 1; ; i++) {
@@ -166,6 +179,7 @@ export async function planPullDeletions(
 
     for (const v of payload.variants) {
       if (v.optionValueIds.length === 0) continue
+      if (sheetChildIds.has(v.childProductId)) continue
       if (wanted.has(comboKey(v.optionValueIds))) continue
       candidates.push({ childProductId: v.childProductId, parentSlug: slug, parentName: parent.name, label: v.label })
     }
@@ -179,6 +193,7 @@ export async function planPullDeletions(
     if (!payload) continue
     for (const v of payload.variants) {
       if (v.optionValueIds.length === 0) continue
+      if (sheetChildIds.has(v.childProductId)) continue
       candidates.push({ childProductId: v.childProductId, parentSlug: payload.product.slug, parentName: payload.product.name, label: v.label })
     }
   }
