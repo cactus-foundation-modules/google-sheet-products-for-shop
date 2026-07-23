@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
-import type { PullJob, PullPhase, PullJobStatus, PullDetected, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
+import type { PullJob, PullPhase, PullJobStatus, PullDetected, StoredDeletionPlan, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // A Pull is a resumable job (see migrations/002_pull_job.sql). This is the whole
 // data layer for the gsp_pull_job row: create it at start, read it each step,
@@ -22,6 +22,7 @@ function mapJob(r: Record<string, unknown>): PullJob {
     phase: r.phase as PullPhase,
     productsGrid: asGrid(r.products_grid),
     variationsGrid: asGrid(r.variations_grid),
+    deletionPlan: (r.deletion_plan as StoredDeletionPlan | null) ?? null,
     lastPushAt: (r.last_push_at as Date | null) ?? null,
     shopImportJobId: (r.shop_import_job_id as string | null) ?? null,
     detected: (r.detected as PullDetected | null) ?? null,
@@ -46,6 +47,7 @@ function mapJob(r: Record<string, unknown>): PullJob {
 export async function createPullJob(data: {
   productsGrid: string[][]
   variationsGrid: string[][]
+  deletionPlan: StoredDeletionPlan
   lastPushAt: Date | null
   shopImportJobId: string
   detected: PullDetected | null
@@ -55,11 +57,12 @@ export async function createPullJob(data: {
 }): Promise<{ id: string }> {
   const rows = await prisma.$queryRaw<[{ id: string }]>`
     INSERT INTO "gsp_pull_job" (
-      "products_grid", "variations_grid", "last_push_at", "shop_import_job_id",
+      "products_grid", "variations_grid", "deletion_plan", "last_push_at", "shop_import_job_id",
       "detected", "products_total", "variations_total", "run_by"
     ) VALUES (
       ${JSON.stringify(data.productsGrid)}::jsonb,
       ${JSON.stringify(data.variationsGrid)}::jsonb,
+      ${JSON.stringify(data.deletionPlan)}::jsonb,
       ${data.lastPushAt},
       ${data.shopImportJobId},
       ${data.detected ? JSON.stringify(data.detected) : null}::jsonb,
@@ -123,14 +126,14 @@ export async function updatePullJob(id: string, fields: PullJobUpdate): Promise<
   if (fields.prodErrors !== undefined) sets.push(Prisma.sql`"prod_errors" = ${fields.prodErrors.length ? JSON.stringify(fields.prodErrors) : null}::jsonb`)
   if (fields.varErrors !== undefined) sets.push(Prisma.sql`"var_errors" = ${fields.varErrors.length ? JSON.stringify(fields.varErrors) : null}::jsonb`)
   if (fields.error !== undefined) sets.push(Prisma.sql`"error" = ${fields.error}`)
-  if (fields.clearGrids) sets.push(Prisma.sql`"products_grid" = NULL`, Prisma.sql`"variations_grid" = NULL`)
+  if (fields.clearGrids) sets.push(Prisma.sql`"products_grid" = NULL`, Prisma.sql`"variations_grid" = NULL`, Prisma.sql`"deletion_plan" = NULL`)
   await prisma.$executeRaw`UPDATE "gsp_pull_job" SET ${Prisma.join(sets, ', ')} WHERE "id" = ${id}`
 }
 
 export async function cancelPullJob(id: string): Promise<void> {
   await prisma.$executeRaw`
     UPDATE "gsp_pull_job"
-    SET "status" = 'CANCELLED', "products_grid" = NULL, "variations_grid" = NULL, "updated_at" = CURRENT_TIMESTAMP
+    SET "status" = 'CANCELLED', "products_grid" = NULL, "variations_grid" = NULL, "deletion_plan" = NULL, "updated_at" = CURRENT_TIMESTAMP
     WHERE "id" = ${id} AND "status" IN ('RUNNING', 'FAILED')
   `
 }

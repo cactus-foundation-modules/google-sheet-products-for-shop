@@ -64,14 +64,18 @@ export async function pullStatus(job: PullJob): Promise<PullStatus> {
 // Write the two audit rows, stamp the pull, and close the job. Called once the
 // last variation batch lands (or immediately if there were no variation rows).
 async function finalizePullJob(job: PullJob): Promise<void> {
+  // Rows the start-of-pull diff proved identical never reached the importers;
+  // they are skips all the same, and the audit log should say so.
   await writeSyncLog({
     direction: 'PULL', tab: 'PRODUCTS', status: 'COMPLETED',
-    createdCount: job.prodCreated, updatedCount: job.prodUpdated, skippedCount: job.prodSkipped,
+    createdCount: job.prodCreated, updatedCount: job.prodUpdated,
+    skippedCount: job.prodSkipped + (job.detected?.productsUnchanged ?? 0),
     archivedCount: job.prodDeleted, errors: job.prodErrors ?? [], runBy: job.runBy,
   })
   await writeSyncLog({
     direction: 'PULL', tab: 'VARIATIONS', status: 'COMPLETED',
     createdCount: job.varCreated, updatedCount: job.varUpdated,
+    skippedCount: job.detected?.variationsUnchanged ?? 0,
     archivedCount: job.varDeleted, errors: job.varErrors ?? [], runBy: job.runBy,
   })
   await stampLastPull()
@@ -132,11 +136,15 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       })
     } else if (job.phase === 'DELETIONS') {
       if (!job.productsGrid || !job.variationsGrid) throw new Error('Pull job is missing its sheet snapshot.')
-      // Status pass (the engine ignores the status column), then every deletion
-      // planned against the push baseline, products first then variations - the
-      // same order and planner the one-shot Pull used.
+      // Status pass (the engine ignores the status column) over the stored grid -
+      // which holds only changed rows, and a changed status is a changed row, so
+      // nothing status-only slips past the filter. Then every deletion from the
+      // plan captured at start against the FULL snapshot: the stored grids are
+      // filtered, and planning from them would delete every skipped row. A job
+      // from before the plan column existed has NULL there and full grids, so the
+      // old planner path still serves it.
       const status = await applyStatusPass(job.productsGrid)
-      const plan = await planPullDeletions(job.productsGrid, job.variationsGrid, job.lastPushAt)
+      const plan = job.deletionPlan ?? await planPullDeletions(job.productsGrid, job.variationsGrid, job.lastPushAt)
       const productDeletions = await applyProductDeletions(plan.products)
       const variationDeletions = await applyVariationDeletions(plan.variations)
       await updatePullJob(jobId, {

@@ -32,9 +32,10 @@ type Preview = {
     toCreate: Array<{ sku: string | null; name: string }>
     toUpdate: Array<{ sku: string | null; name: string; changes: Change[] }>
     toDelete: Array<{ id: string; sku: string | null; name: string }>
+    unchanged: number
     rowErrors: RowError[]
   }
-  variations: { toCreate: number; toUpdate: number; toDelete: number; rowErrors: RowError[] }
+  variations: { toCreate: number; toUpdate: number; toDelete: number; unchanged: number; rowErrors: RowError[] }
   staleness: { changedSinceLastPush: number; since: string | null }
   headerMissing: string[]
 }
@@ -51,15 +52,10 @@ type SyncLog = {
   createdAt: string
 }
 
-function detectedFromPreview(p: Preview): PullDetected {
-  return {
-    productsCreate: p.products.toCreate.length,
-    productsUpdate: p.products.toUpdate.length,
-    productsDelete: p.products.toDelete.length,
-    variationsCreate: p.variations.toCreate,
-    variationsUpdate: p.variations.toUpdate,
-    variationsDelete: p.variations.toDelete,
-  }
+// Pluralise without the "(s)" crutch - "1 product" / "3 products" reads like a
+// person wrote it.
+function n(count: number, singular: string, plural?: string): string {
+  return `${count} ${count === 1 ? singular : plural ?? `${singular}s`}`
 }
 
 export function GoogleSheetProductsToolbar() {
@@ -263,11 +259,42 @@ const PHASE_LABEL: Record<PullStatus['phase'], string> = {
   DONE: 'Done',
 }
 
+// Which phases come after this one, for the "Products → Removals → Variations"
+// step tracker - so the owner can see there's more to come rather than watching
+// one bar and wondering if that's the whole job.
+const PHASE_ORDER: PullStatus['phase'][] = ['PRODUCTS', 'DELETIONS', 'VARIATIONS', 'DONE']
+const PHASE_SHORT: Record<PullStatus['phase'], string> = {
+  PRODUCTS: 'Products', DELETIONS: 'Removals', VARIATIONS: 'Variations', DONE: 'Done',
+}
+
+function PhaseTracker({ phase }: { phase: PullStatus['phase'] }) {
+  const currentIdx = PHASE_ORDER.indexOf(phase)
+  return (
+    <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.75rem', fontSize: '0.75rem' }}>
+      {(['PRODUCTS', 'DELETIONS', 'VARIATIONS'] as const).map((p, i) => {
+        const idx = PHASE_ORDER.indexOf(p)
+        const state = idx < currentIdx ? 'done' : idx === currentIdx ? 'active' : 'pending'
+        return (
+          <div key={p} style={{
+            padding: '0.15rem 0.55rem', borderRadius: '999px',
+            background: state === 'pending' ? 'var(--color-bg-subtle)' : 'var(--color-primary)',
+            color: state === 'pending' ? 'var(--color-text-muted)' : 'var(--color-on-primary)',
+            opacity: state === 'done' ? 0.6 : 1, fontWeight: state === 'active' ? 600 : 400,
+          }}>
+            {state === 'done' ? '✓ ' : ''}{PHASE_SHORT[p]}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullStatus | null; onClose: () => void; onResumableChange: (s: PullStatus | null) => void }) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [status, setStatus] = useState<PullStatus | null>(resumable)
   const [pulling, setPulling] = useState(false)
+  const [starting, setStarting] = useState(false)
   const pullJobId = useRef<string | null>(resumable?.pullJobId ?? null)
   const pollRef = useRef<number | null>(null)
   const looping = useRef(false)
@@ -369,10 +396,14 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
 
   async function startPull() {
     if (!preview) return
-    const detected = detectedFromPreview(preview)
+    setStarting(true)
     setLoadErr(null)
-    const res = await fetch(`${BASE}/pull`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ detected }) })
+    // The server re-reads and re-diffs the sheet itself - what it starts is what
+    // the sheet says NOW, not what this dialog happened to show. Its own counts
+    // come back in the 202 for the progress view.
+    const res = await fetch(`${BASE}/pull`, { method: 'POST' })
     const body = await res.json().catch(() => ({}))
+    setStarting(false)
     if (res.status === 409 && body.pullJobId) { pullJobId.current = body.pullJobId; await runSteps(body.pullJobId); return }
     if (!res.ok || !body.pullJobId) { setLoadErr(failureText(res, body, 'Pull failed to start.')); return }
     pullJobId.current = body.pullJobId
@@ -380,7 +411,8 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
       pullJobId: body.pullJobId, status: 'RUNNING', phase: 'PRODUCTS', done: false,
       productsTotal: body.productsTotal ?? 0, productsDone: 0,
       variationsTotal: body.variationsTotal ?? 0, variationsDone: 0,
-      detected, counts: { productsCreated: 0, productsUpdated: 0, productsDeleted: 0, variationsCreated: 0, variationsUpdated: 0, variationsDeleted: 0 },
+      detected: body.detected ?? null,
+      counts: { productsCreated: 0, productsUpdated: 0, productsDeleted: 0, variationsCreated: 0, variationsUpdated: 0, variationsDeleted: 0 },
       errorCount: 0, error: null,
     })
     await runSteps(body.pullJobId)
@@ -419,13 +451,22 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>{PHASE_LABEL[status.phase]}</p>
         )}
 
+        {!status.done && <PhaseTracker phase={status.phase} />}
+
         <ProgressRow label="Products" done={status.productsDone} total={status.productsTotal} />
         <ProgressRow label="Variations" done={status.variationsDone} total={status.variationsTotal} />
 
+        {(status.detected?.productsUnchanged || status.detected?.variationsUnchanged) ? (
+          <p style={{ ...muted, fontSize: '0.75rem', marginTop: '-0.35rem', marginBottom: '0.6rem' }}>
+            Only rows that actually changed are being touched -
+            {' '}{n((status.detected.productsUnchanged ?? 0) + (status.detected.variationsUnchanged ?? 0), 'row')} already matched your sheet and {(status.detected.productsUnchanged ?? 0) + (status.detected.variationsUnchanged ?? 0) === 1 ? 'was' : 'were'} skipped.
+          </p>
+        ) : null}
+
         <p style={{ ...muted, fontSize: '0.8125rem', marginTop: '0.75rem' }}>
-          {c.productsCreated} product(s) added, {c.productsUpdated} updated{c.productsDeleted ? `, ${c.productsDeleted} deleted` : ''}.
-          {' '}{c.variationsCreated} variation(s) added, {c.variationsUpdated} updated{c.variationsDeleted ? `, ${c.variationsDeleted} removed` : ''}.
-          {status.errorCount ? ` ${status.errorCount} row(s) had errors.` : ''}
+          {n(c.productsCreated, 'product')} added, {n(c.productsUpdated, 'product')} updated{c.productsDeleted ? `, ${n(c.productsDeleted, 'product')} deleted` : ''}.
+          {' '}{n(c.variationsCreated, 'variation')} added, {n(c.variationsUpdated, 'variation')} updated{c.variationsDeleted ? `, ${n(c.variationsDeleted, 'variation')} removed` : ''}.
+          {status.errorCount ? ` ${n(status.errorCount, 'row')} had errors.` : ''}
         </p>
 
         {loadErr && <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem', marginTop: '0.5rem' }}>{loadErr}</p>}
@@ -449,34 +490,48 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
   // Preview / confirm view (before the first step).
   const p = preview?.products
   const deleteCount = (p?.toDelete.length ?? 0) + (preview?.variations.toDelete ?? 0)
+  const totalRows = p ? p.toCreate.length + p.toUpdate.length + p.unchanged + (preview?.variations.toCreate ?? 0) + (preview?.variations.toUpdate ?? 0) + (preview?.variations.unchanged ?? 0) : 0
+  const unchangedTotal = (p?.unchanged ?? 0) + (preview?.variations.unchanged ?? 0)
+  const changedTotal = totalRows - unchangedTotal
+  const nothingToDo = !!p && totalRows > 0 && changedTotal === 0 && deleteCount === 0
   return (
     <Modal title={title} onClose={onClose}>
       {loadErr ? (
         <p style={{ color: 'var(--color-danger)' }}>{loadErr}</p>
       ) : !preview || !p ? (
-        <p style={muted}>Reading your sheet…</p>
+        <p style={muted}>Reading your sheet and comparing it with your catalogue…</p>
       ) : preview.headerMissing.length > 0 ? (
         <p style={{ color: 'var(--color-danger)' }}>
           Your sheet is missing these columns: {preview.headerMissing.join(', ')}. Fix the header row before pulling.
         </p>
+      ) : nothingToDo ? (
+        <>
+          <p style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Your sheet already matches your shop.</p>
+          <p style={{ ...muted, marginBottom: '1rem' }}>
+            Checked {n(totalRows, 'row')} - nothing to create, update, or remove. There is nothing for Pull to do.
+          </p>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>Close</button>
+        </>
       ) : (
         <>
-          <p style={{ ...muted, marginBottom: '0.75rem' }}>Nothing has changed yet. Here is what Pull will do:</p>
+          <p style={{ ...muted, marginBottom: '0.75rem' }}>
+            Checked {n(totalRows, 'row')}{unchangedTotal > 0 ? ` - ${n(unchangedTotal, 'row')} already matched and will be left alone` : ''}. Here is what Pull will actually do:
+          </p>
 
           {preview.staleness.changedSinceLastPush > 0 && (
             <p style={{ fontWeight: 600 }}>
-              {preview.staleness.changedSinceLastPush} product(s) changed in the admin since you last pushed. Pulling will overwrite those changes.
+              {n(preview.staleness.changedSinceLastPush, 'product')} changed in the admin since you last pushed. Pulling will overwrite those changes.
             </p>
           )}
 
           <ul style={{ margin: '0 0 0.75rem 1rem' }}>
-            <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.toDelete.length ? `, ${p.toDelete.length} to delete` : ''}{p.rowErrors.length ? `, ${p.rowErrors.length} row(s) with errors` : ''}.</li>
-            <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.toDelete ? `, ${preview.variations.toDelete} to remove` : ''}{preview.variations.rowErrors.length ? `, ${preview.variations.rowErrors.length} row(s) with errors` : ''}.</li>
+            <li>Products: {p.toCreate.length} to create, {p.toUpdate.length} to update{p.toDelete.length ? `, ${p.toDelete.length} to delete` : ''}{p.rowErrors.length ? `, ${n(p.rowErrors.length, 'row')} with errors` : ''}.</li>
+            <li>Variations: {preview.variations.toCreate} to create, {preview.variations.toUpdate} to update{preview.variations.toDelete ? `, ${preview.variations.toDelete} to remove` : ''}{preview.variations.rowErrors.length ? `, ${n(preview.variations.rowErrors.length, 'row')} with errors` : ''}.</li>
           </ul>
 
           {preview.variations.toDelete > 0 && (
             <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
-              {preview.variations.toDelete} variation(s) are on your site but no longer in the sheet. Pulling removes them for good.
+              {n(preview.variations.toDelete, 'variation is', 'variations are')} on your site but no longer in the sheet. Pulling removes {preview.variations.toDelete === 1 ? 'it' : 'them'} for good.
             </p>
           )}
 
@@ -490,11 +545,25 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
             </details>
           )}
 
+          {p.toUpdate.length > 0 && (
+            <details style={{ marginBottom: '0.75rem' }}>
+              <summary style={{ cursor: 'pointer' }}>What&apos;s changing on {n(p.toUpdate.length, 'product')}</summary>
+              <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.5rem 0 0 1rem' }}>
+                {p.toUpdate.slice(0, 25).map((m, i) => (
+                  <li key={i}>
+                    {m.name}{m.sku ? ` (${m.sku})` : ''}: {m.changes.map((c) => `${c.field} "${c.from}" → "${c.to}"`).join(', ')}
+                  </li>
+                ))}
+                {p.toUpdate.length > 25 && <li>…and {n(p.toUpdate.length - 25, 'more')}.</li>}
+              </ul>
+            </details>
+          )}
+
           {p.toDelete.length > 0 && (
             <div style={{ marginBottom: '0.75rem' }}>
               <div style={{ fontWeight: 600, color: 'var(--color-danger)' }}>In the shop but not in your sheet</div>
               <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem' }}>
-                These {p.toDelete.length} product(s) will be permanently deleted on Pull, together with any of their variations. This cannot be undone.
+                {n(p.toDelete.length, 'product')} will be permanently deleted on Pull, together with any of their variations. This cannot be undone.
               </p>
               <ul style={{ ...muted, fontSize: '0.8125rem', margin: '0.25rem 0 0 1rem' }}>
                 {p.toDelete.map((m) => <li key={m.id}>{m.name}{m.sku ? ` (${m.sku})` : ''}</li>)}
@@ -503,10 +572,10 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
           )}
 
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
-            <button type="button" className="btn btn-primary btn-sm" onClick={startPull}>
-              Pull{deleteCount ? ` and delete ${deleteCount}` : ''}
+            <button type="button" className="btn btn-primary btn-sm" onClick={startPull} disabled={starting}>
+              {starting ? 'Starting…' : `Pull${deleteCount ? ` and delete ${deleteCount}` : ''}`}
             </button>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>Cancel</button>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onClose} disabled={starting}>Cancel</button>
           </div>
         </>
       )}

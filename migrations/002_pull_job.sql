@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS "gsp_pull_job" (
     -- so a completed row does not carry the whole catalogue around.
     "products_grid"        JSONB,
     "variations_grid"      JSONB,
+    -- The deletion plan computed at start from the FULL sheet snapshot (the grids
+    -- above hold only changed rows since the diff-at-start rework - planning from
+    -- them would delete every skipped row). Applied verbatim by the DELETIONS
+    -- phase; nulled with the grids on finish. See 003_deletion_plan.sql.
+    "deletion_plan"        JSONB,
     -- Deletion baseline captured at start (the connection's last_push_at). Kept on
     -- the job so every DELETIONS re-run plans against the same anchor.
     "last_push_at"         TIMESTAMP(3),
