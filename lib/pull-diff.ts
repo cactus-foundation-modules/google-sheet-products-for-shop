@@ -5,6 +5,7 @@ import { getProductsBySlugs } from '@/modules/shop/lib/db/products'
 import { getEditorPayloadsBatch, type VariantEditorRow } from '@/modules/shop-variations/lib/variants-service'
 import { parseVariantImages } from '@/modules/shop-variations/lib/csv'
 import { resolveVariantFieldProviders } from '@/modules/shop-variations/lib/variant-field-providers'
+import { resolveProductFieldProviders } from '@/modules/shop/lib/product-field-providers'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // Row-level diff of the sheet against the shop, shared by the Pull preview (what
@@ -69,6 +70,9 @@ function normHeader(grid: string[][]): string[] {
 // rows start at 1), so callers can filter the grid by it.
 export async function diffProductRows(productsGrid: string[][]): Promise<ProductRowResult[]> {
   const header = normHeader(productsGrid)
+  // The header as typed, for the record handed to product-field providers - they
+  // match a column by its attribute name, so it must not be normalised.
+  const rawHeader = (productsGrid[0] ?? []).map((h) => h.trim())
   // Only diff header columns that are ours; an owner's own extra columns are
   // invisible to the importer, so they must be invisible here too.
   const compared: Array<{ col: CsvColumn; idx: number }> = []
@@ -83,6 +87,25 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
   for (const r of csvRows) {
     if (r.sku) bySku.set(r.sku, r)
     bySlug.set(r.slug, r)
+  }
+
+  // Product-field providers (product-level attributes) so a row whose only edit is
+  // one of their columns is not mistaken for unchanged and dropped - the Products
+  // twin of the variation-attribute handling in diffVariationRows. A provider that
+  // owns columns but cannot diff them makes "unchanged" unprovable, so every
+  // matched row is treated as an update: slower, never wrong.
+  const allProviders = await resolveProductFieldProviders()
+  const providers = allProviders.filter((p) => typeof p.provider.rowChanged === 'function')
+  const undiffableProviders = allProviders.length > providers.length
+  const productBySlug = allProviders.length > 0
+    ? await getProductsBySlugs(csvRows.map((r) => r.slug))
+    : new Map<string, { id: string }>()
+  const providerCtx = new Map<string, unknown>()
+  if (providers.length > 0) {
+    const productIds = [...new Set([...productBySlug.values()].map((p) => p.id))]
+    for (const { id, provider } of providers) {
+      if (provider.beginImport) providerCtx.set(id, await provider.beginImport(productIds))
+    }
   }
 
   const nameCol = header.indexOf('name')
@@ -122,11 +145,37 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
         : sameValue(from, to)
       if (!equal) changes.push({ field: col, from, to })
     }
-    results.push(changes.length > 0
-      ? { row: r, kind: 'update', sku, name, changes }
-      : { row: r, kind: 'unchanged', sku, name })
+    if (changes.length > 0) { results.push({ row: r, kind: 'update', sku, name, changes }); continue }
+
+    // No fixed-column change: a product-level attribute column may still have been
+    // edited. Ask each provider; only when none reports a change is the row truly
+    // unchanged and safe to drop from the Pull.
+    const productId = productBySlug.get(existing.slug)?.id
+    if (productId && (undiffableProviders || await providerRowChangedProduct(providers, productId, rawHeader, row, providerCtx))) {
+      results.push({ row: r, kind: 'update', sku, name, changes: [{ field: 'attributes', from: '', to: 'edited in sheet' }] })
+    } else {
+      results.push({ row: r, kind: 'unchanged', sku, name })
+    }
   }
   return results
+}
+
+// Would any product-field provider column change for this row? Builds the same
+// header-keyed record the pass hands providers, then asks each provider's
+// read-only rowChanged, stopping at the first that says yes.
+async function providerRowChangedProduct(
+  providers: Awaited<ReturnType<typeof resolveProductFieldProviders>>,
+  productId: string,
+  header: string[],
+  cols: string[],
+  providerCtx: Map<string, unknown>,
+): Promise<boolean> {
+  const rowRecord: Record<string, string> = {}
+  header.forEach((h, i) => { rowRecord[h] = (cols[i] ?? '').trim() })
+  for (const { id, provider } of providers) {
+    if (await provider.rowChanged!(productId, rowRecord, providerCtx.get(id))) return true
+  }
+  return false
 }
 
 // Blank/non-numeric -> undefined, exactly as the importer's num() treats a cell.

@@ -3,6 +3,7 @@ import { getImportJobById, updateImportJobProgress } from '@/modules/shop/lib/db
 import { importVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { gridToImportCsv } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { applyStatusPass } from '@/modules/google-sheet-products-for-shop/lib/status-pass'
+import { applyProductFieldsPass } from '@/modules/google-sheet-products-for-shop/lib/product-fields-pass'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
@@ -189,15 +190,18 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       // from before the plan column existed has NULL there and full grids, so the
       // old planner path still serves it.
       const status = await applyStatusPass(job.productsGrid)
+      // Product-level attribute columns the import engine cannot see, applied over
+      // the same stored (changed-rows-only) grid the status pass uses.
+      const attributes = await applyProductFieldsPass(job.productsGrid)
       const plan = job.deletionPlan ?? await planPullDeletions(job.productsGrid, job.variationsGrid, job.lastPushAt)
       const productDeletions = await applyProductDeletions(plan.products)
       const variationDeletions = await applyVariationDeletions(plan.variations)
       await updatePullJob(jobId, {
         phase: 'VARIATIONS', status: 'RUNNING', error: null,
-        prodUpdated: job.prodUpdated + status.updated,
+        prodUpdated: job.prodUpdated + status.updated + attributes.updated,
         prodDeleted: productDeletions.deleted,
         varDeleted: variationDeletions.deleted,
-        prodErrors: [...(job.prodErrors ?? []), ...status.errors, ...productDeletions.errors],
+        prodErrors: [...(job.prodErrors ?? []), ...status.errors, ...attributes.errors, ...productDeletions.errors],
         varErrors: [...(job.varErrors ?? []), ...variationDeletions.errors],
       })
     } else if (job.phase === 'VARIATIONS') {

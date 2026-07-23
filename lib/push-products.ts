@@ -1,5 +1,7 @@
 import { CSV_COLUMNS, NUMERIC_CSV_COLUMNS, BOOLEAN_CSV_COLUMNS, type CsvColumn } from '@/modules/shop/lib/csv'
 import { buildProductCsvRows } from '@/modules/shop/lib/csv-rows'
+import { getProductsBySlugs } from '@/modules/shop/lib/db/products'
+import { resolveProductFieldProviders } from '@/modules/shop/lib/product-field-providers'
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
@@ -37,8 +39,52 @@ function typedCell(column: CsvColumn, value: string): CellValue {
 export async function buildProductsGrid(): Promise<CellValue[][]> {
   const rows = await buildProductCsvRows()
   const columns = productColumns()
-  const grid: CellValue[][] = [columns.map((c) => c as CellValue)]
-  for (const row of rows) grid.push(columns.map((c) => typedCell(c, row[c] ?? '')))
+
+  // Product-level attribute columns (and any other module's product fields),
+  // appended after the fixed columns - the Products-tab twin of the extra-field
+  // columns the Variations tab carries. Each provider contributes a set that
+  // varies per product, so the header is the union of every column label seen, in
+  // first-seen order, and a product without a given column leaves its cell blank.
+  const providers = await resolveProductFieldProviders()
+  const bySlug = await getProductsBySlugs(rows.map((r) => r.slug))
+  const idBySlug = new Map(rows.map((r) => [r.slug, bySlug.get(r.slug)?.id]).filter((e): e is [string, string] => !!e[1]))
+  const productIds = [...new Set(idBySlug.values())]
+
+  const fieldHeaderOrder: string[] = []
+  const colsByProduct = new Map<string, Array<{ key: string; label: string }>>()
+  const valuesByProduct = new Map<string, Record<string, string>>()
+  if (providers.length > 0 && productIds.length > 0) {
+    for (const productId of productIds) {
+      const cols: Array<{ key: string; label: string }> = []
+      for (const { provider } of providers) {
+        for (const c of await provider.listColumns(productId)) {
+          cols.push({ key: c.key, label: c.label })
+          if (!fieldHeaderOrder.includes(c.label)) fieldHeaderOrder.push(c.label)
+        }
+      }
+      colsByProduct.set(productId, cols)
+    }
+    for (const { provider } of providers) {
+      const got = await provider.getValues(productIds)
+      for (const [productId, rec] of Object.entries(got)) {
+        valuesByProduct.set(productId, { ...(valuesByProduct.get(productId) ?? {}), ...rec })
+      }
+    }
+  }
+
+  const header: CellValue[] = [...columns.map((c) => c as CellValue), ...fieldHeaderOrder]
+  const grid: CellValue[][] = [header]
+  for (const row of rows) {
+    const base = columns.map((c) => typedCell(c, row[c] ?? ''))
+    const productId = idBySlug.get(row.slug)
+    const cols = productId ? colsByProduct.get(productId) ?? [] : []
+    const values = productId ? valuesByProduct.get(productId) ?? {} : {}
+    const fieldCells: CellValue[] = fieldHeaderOrder.map((label) => {
+      const col = cols.find((c) => c.label === label)
+      return col ? values[col.key] ?? '' : ''
+    })
+    grid.push([...base, ...fieldCells])
+  }
   return grid
 }
 
