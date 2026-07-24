@@ -95,39 +95,49 @@ async function finalizePullJob(job: PullJob): Promise<void> {
   await updatePullJob(job.id, { status: 'COMPLETED', phase: 'DONE', clearGrids: true })
 }
 
-// A fixed namespace for this module's transaction-scoped advisory locks, so a
-// job-id hash cannot collide with an unrelated advisory lock taken elsewhere in
-// the app. Arbitrary but constant, and within int4 - what pg_advisory_* take.
-const PULL_LOCK_NAMESPACE = 0x67737001 // "gsp\x01", a signed int4
+// How long a claimed step lease lasts before another worker may take the job
+// over. Longer than any single request can live (the module dispatcher kills a
+// route at 60s), so a lease only ever expires on a step that is already dead -
+// a live step always finishes and releases well inside it.
+const STEP_LEASE_MS = 90_000
 
-// Run `fn` only when no other worker is already stepping this job, serialised by a
-// transaction-scoped advisory lock keyed on the job id. Returns false, without
-// running `fn`, when another worker holds the lock.
+// Run `fn` only when no other worker is already stepping this job. Returns
+// false, without running `fn`, when another worker holds the lease.
 //
-// pg_try_advisory_XACT_lock rather than the session-level pg_advisory_lock on
-// purpose: an xact lock lives and dies with this transaction, so a step the
-// platform kills at the module dispatcher's 60s ceiling takes its lock down with
-// the request instead of stranding it - the next Continue is free to claim the
-// job with no lease to wait out. It also survives connection pooling, where a
-// session lock taken on one pooled connection would not be held on the next.
+// This used to be a transaction-scoped advisory lock (pg_try_advisory_xact_lock)
+// held in a prisma.$transaction for the whole step. That self-deadlocks on an
+// install whose DATABASE_URL runs through a pooler with connection_limit=1: the
+// open transaction owns the pool's ONLY connection, every query inside the step
+// runs on the global client and queues for a second one, and after 20 seconds
+// Prisma gives up - "Timed out fetching a new connection from the connection
+// pool" on every step, surfaced as an endless "Hit a snag - retrying".
+//
+// The lease is a single atomic UPDATE on the job row instead: claim and release
+// each hold a connection only for their own statement, so the step's queries run
+// with the pool to themselves. A step the platform kills never reaches the
+// release, which is why the claim also accepts an EXPIRED lease - the next
+// Continue waits out at most STEP_LEASE_MS, exactly the stranded-lock case the
+// old xact lock avoided, priced in rather than avoided because a lease survives
+// transaction pooling and a pool of one, which the xact lock did not.
 async function withPullStepLock(jobId: string, fn: () => Promise<void>): Promise<boolean> {
-  return prisma.$transaction(
-    async (tx) => {
-      // The ::int4 cast is load-bearing: Prisma binds a JS number as bigint, and
-      // Postgres has no (bigint, integer) overload of this function - without the
-      // cast every call fails with 42883 and no step can ever run.
-      const rows = await tx.$queryRaw<[{ locked: boolean }]>`
-        SELECT pg_try_advisory_xact_lock(${PULL_LOCK_NAMESPACE}::int4, hashtext(${jobId})) AS "locked"
-      `
-      if (!rows[0]?.locked) return false
-      await fn()
-      return true
-    },
-    // A step runs right up to the dispatcher's ceiling, so the transaction (and
-    // its lock) must be allowed to live that long. maxWait is only how long to
-    // queue for a pooled connection to begin the transaction.
-    { timeout: 60_000, maxWait: 10_000 },
-  )
+  const claimed = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE "gsp_pull_job"
+    SET "step_lease_until" = now() + (${STEP_LEASE_MS}::int4 * interval '1 millisecond')
+    WHERE "id" = ${jobId}
+      AND ("step_lease_until" IS NULL OR "step_lease_until" < now())
+    RETURNING "id"
+  `
+  if (claimed.length === 0) return false
+  try {
+    await fn()
+  } finally {
+    // Best-effort: a failed release just means the next step waits out the
+    // lease. Never let it mask an error thrown by the step itself.
+    await prisma
+      .$executeRaw`UPDATE "gsp_pull_job" SET "step_lease_until" = NULL WHERE "id" = ${jobId}`
+      .catch(() => {})
+  }
+  return true
 }
 
 // One bounded slice of the Pull, run under the job lock by stepPullJob. Every

@@ -6,7 +6,7 @@ import {
   columnLetter,
   type CellValue,
 } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { orderRowsLikeSheet, planFormulaPreservation, toFormulaRuns, type KeyStrategy } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
+import { orderColumnsLikeSheet, orderRowsLikeSheet, planFormulaPreservation, toFormulaRuns, type KeyStrategy } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
 
 // Writing one tab on a Push.
 //
@@ -51,7 +51,12 @@ export async function pushGrid(params: {
   // rows from deleted products in the tab. The read uses the same credentials as
   // the write that follows, so anything that breaks it breaks the Push anyway.
   const oldGrid = await readGridWithFormulas(spreadsheetId, tab)
-  const grid = orderRowsLikeSheet({ oldGrid, newGrid: params.grid, keyStrategies })
+  // Columns first, then rows: both re-orderings match the sheet the owner is
+  // looking at, so neither a database export shuffle nor a module update's
+  // changed "first seen" attribute order can move cells out from under their
+  // formulas (see orderColumnsLikeSheet / orderRowsLikeSheet).
+  const columnsAligned = orderColumnsLikeSheet({ oldGrid, newGrid: params.grid, ownsColumn })
+  const grid = orderRowsLikeSheet({ oldGrid, newGrid: columnsAligned, keyStrategies })
   const preserved = planFormulaPreservation({ oldGrid, newGrid: grid, keyStrategies })
 
   await writeGrid(spreadsheetId, tab, grid)

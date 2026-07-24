@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { orderRowsLikeSheet, planFormulaPreservation, toFormulaRuns, valuesMatch } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
+import { orderColumnsLikeSheet, orderRowsLikeSheet, planFormulaPreservation, toFormulaRuns, valuesMatch } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
 import type { SheetCell, CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
 // Shorthand builders. `v` is a plain value cell, `f` a formula cell with the
@@ -158,6 +158,82 @@ describe('planFormulaPreservation', () => {
     ]
     const newGrid: CellValue[][] = [HEADER, ['A1', 'chair', 'Chair', 15]]
     expect(plan(oldGrid, newGrid)).toEqual([{ row: 1, col: 3, formula: '=D2*1.2' }])
+  })
+})
+
+describe('orderColumnsLikeSheet', () => {
+  const OWNED = new Set(HEADER) // sku, slug, name, price - the fixed block
+  const owns = (h: string) => OWNED.has(h)
+  const orderCols = (oldGrid: SheetCell[][], newGrid: CellValue[][]) =>
+    orderColumnsLikeSheet({ oldGrid, newGrid, ownsColumn: owns })
+
+  it('restores the sheet order when the open tail shuffles', () => {
+    // A module update changed which product is "seen first", swapping the two
+    // attribute blocks - the sheet's existing order wins.
+    const oldGrid = [
+      [...oldHeader, v('Colour'), v('Size')],
+      [v('A1'), v('chair'), v('Chair'), v(15), f('=D2', 'Blue'), v('L')],
+    ]
+    const newGrid: CellValue[][] = [
+      [...HEADER, 'Size', 'Colour'],
+      ['A1', 'chair', 'Chair', 15, 'L', 'Blue'],
+    ]
+    const reordered = orderCols(oldGrid, newGrid)
+    expect(reordered).toEqual([
+      [...HEADER, 'Colour', 'Size'],
+      ['A1', 'chair', 'Chair', 15, 'Blue', 'L'],
+    ])
+    // With the columns back in place the formula survives the Push.
+    expect(planFormulaPreservation({ oldGrid, newGrid: reordered, keyStrategies: KEYS })).toEqual([
+      { row: 1, col: 4, formula: '=D2' },
+    ])
+  })
+
+  it('appends a label the sheet has not seen at the end, in export order', () => {
+    const oldGrid = [
+      [...oldHeader, v('Colour')],
+      [v('A1'), v('chair'), v('Chair'), v(15), v('Blue')],
+    ]
+    const newGrid: CellValue[][] = [
+      [...HEADER, 'Material', 'Colour', 'Finish'],
+      ['A1', 'chair', 'Chair', 15, 'Oak', 'Blue', 'Matt'],
+    ]
+    expect(orderCols(oldGrid, newGrid)).toEqual([
+      [...HEADER, 'Colour', 'Material', 'Finish'],
+      ['A1', 'chair', 'Chair', 15, 'Blue', 'Oak', 'Matt'],
+    ])
+  })
+
+  it('bails when a module-owned column changed the fixed block', () => {
+    // An update inserting a fixed column is a genuine shape change - the
+    // documented flatten, never a guessed reorder.
+    const oldGrid = [oldHeader, [v('A1'), v('chair'), v('Chair'), v(15)]]
+    const newGrid: CellValue[][] = [
+      ['sku', 'slug', 'cost_price', 'name', 'price'],
+      ['A1', 'chair', 4, 'Chair', 15],
+    ]
+    expect(orderColumnsLikeSheet({ oldGrid, newGrid, ownsColumn: (h) => h === 'cost_price' || OWNED.has(h) })).toBe(newGrid)
+  })
+
+  it('returns the grid untouched when the headers already line up', () => {
+    const oldGrid = [
+      [...oldHeader, v('Colour')],
+      [v('A1'), v('chair'), v('Chair'), v(15), v('Blue')],
+    ]
+    const newGrid: CellValue[][] = [
+      [...HEADER, 'Colour'],
+      ['A1', 'chair', 'Chair', 15, 'Blue'],
+    ]
+    expect(orderCols(oldGrid, newGrid)).toBe(newGrid)
+  })
+
+  it('leaves an empty or header-only grid alone', () => {
+    const newGrid: CellValue[][] = [[...HEADER, 'Colour']]
+    expect(orderCols([], [[...HEADER, 'Colour'], ['A1', 'chair', 'Chair', 15, 'Blue']])).toEqual([
+      [...HEADER, 'Colour'],
+      ['A1', 'chair', 'Chair', 15, 'Blue'],
+    ])
+    expect(orderCols([oldHeader], newGrid)).toBe(newGrid)
   })
 })
 
