@@ -19,6 +19,19 @@ import type { CellValue } from '@/modules/google-sheet-products-for-shop/lib/she
 // "100.0" (trailing zero), "1,000" (separator), "12kg" and a 17-digit id that
 // would lose precision all stay text, untouched. Blank stays blank.
 
+// Numbers that came through a spreadsheet formula are rarely bit-identical to
+// the number the database holds: "=12.5*1.2" evaluates to 15.000000000000002,
+// not 15. This relative tolerance is shared by formula preservation (Push) and
+// the row diff (Pull) so the two sides agree on what "the same number" means:
+// a formula Push preserves MUST read as unchanged to the Pull that follows it,
+// or every preserved formula flags its row as an update forever (the noise can
+// never be imported away - the database column's scale rounds it right back).
+export const NUMERIC_TOLERANCE = 1e-9
+
+export function numbersMatch(a: number, b: number): boolean {
+  return Math.abs(a - b) <= NUMERIC_TOLERANCE * Math.max(1, Math.abs(a), Math.abs(b))
+}
+
 // The value as a canonical number, or null when the string is not one. Canonical
 // means String(Number(s)) === s: the number carries everything the string did.
 export function canonicalNumber(value: string): number | null {

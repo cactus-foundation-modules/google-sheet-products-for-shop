@@ -150,3 +150,39 @@ describe('diffProductRows - product-level attribute edit', () => {
     expect(results[0]?.kind).toBe('unchanged')
   })
 })
+
+// Regression: Push preserves an owner's price formula when its result matches
+// the shop within float tolerance (formula-preserve's numbersMatch), so the
+// sheet legitimately holds 122.10000000000002 where the shop holds 122.1. The
+// diff used exact numeric equality, so every preserved-formula row read as an
+// update on every Pull, forever - on the live deskwell sheet that was 284 of
+// 575 variation rows flagged straight after a Push that changed nothing.
+describe('float noise from preserved formulas reads as unchanged', () => {
+  it('variation Price with formula float noise is unchanged', async () => {
+    const grid = [
+      ['Parent Slug', 'Option 1', 'Value 1', 'Variant ID', 'Price', 'Catalog'],
+      // v.price is 10; a preserved "=x*y" formula reads back with float noise.
+      ['widget', 'Size', 'Large', 'child-1', '10.000000000000002', 'Spring'],
+    ]
+    const results = await diffVariationRows(grid)
+    expect(results[0]?.kind).toBe('unchanged')
+  })
+
+  it('a real variation price change still flags as update', async () => {
+    const grid = [
+      ['Parent Slug', 'Option 1', 'Value 1', 'Variant ID', 'Price', 'Catalog'],
+      ['widget', 'Size', 'Large', 'child-1', '10.5', 'Spring'],
+    ]
+    const results = await diffVariationRows(grid)
+    expect(results[0]?.kind).toBe('update')
+  })
+
+  it('product price with formula float noise is unchanged', async () => {
+    const noisy = { ...Object.fromEntries(CSV_COLUMNS.map((c) => [c, ''])), name: 'Widget', slug: 'widget', type: 'PHYSICAL', price: '122.1' } as Record<string, string>
+    buildProductCsvRows.mockResolvedValueOnce([noisy])
+    productRowChanged.mockResolvedValueOnce(false)
+    const cells = CSV_COLUMNS.map((c) => (c === 'price' ? '122.10000000000002' : noisy[c] ?? ''))
+    const results = await diffProductRows([[...CSV_COLUMNS], cells])
+    expect(results[0]?.kind).toBe('unchanged')
+  })
+})

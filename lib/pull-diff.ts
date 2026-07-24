@@ -7,6 +7,7 @@ import { parseVariantImages } from '@/modules/shop-variations/lib/csv'
 import { resolveVariantFieldProviders } from '@/modules/shop-variations/lib/variant-field-providers'
 import { resolveProductFieldProviders } from '@/modules/shop/lib/product-field-providers'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
+import { numbersMatch } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 
 // Row-level diff of the sheet against the shop, shared by the Pull preview (what
 // the confirm dialog lists) and the Pull itself (which rows actually get fed to
@@ -47,14 +48,18 @@ const CASE_INSENSITIVE_COLUMNS: ReadonlySet<CsvColumn> = new Set<CsvColumn>([
 
 // Same numeric-tolerant equality the eye would use: "9.9" and "9.90" are equal
 // (Sheets strips trailing zeros off numeric cells), but two non-numbers compare
-// as trimmed strings.
+// as trimmed strings. Numbers compare through numbersMatch, the same float
+// tolerance formula preservation uses on Push: a preserved "=B2*1.1" reads back
+// as 122.10000000000002 where the shop holds 122.1, and an exact compare called
+// every such row changed on every Pull, forever (importing it changes nothing -
+// the database column's scale rounds the noise away again).
 function sameValue(a: string, b: string): boolean {
   const ta = a.trim()
   const tb = b.trim()
   if (ta !== '' && tb !== '') {
     const na = Number(ta)
     const nb = Number(tb)
-    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na === nb
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return numbersMatch(na, nb)
   }
   return ta === tb
 }
@@ -198,9 +203,13 @@ function variationRowChanged(
   col: { sku: number; price: number; salePrice: number; rrp: number; tradePrice: number; costPrice: number; stock: number; barcode: number; supplier: number; weight: number; image: number },
 ): boolean {
   const cell = (i: number) => (cols[i] ?? '').trim()
+  // Every number compares through numbersMatch, the float tolerance Push's
+  // formula preservation uses: a preserved cost-price formula reads back as
+  // 122.10000000000002 against a stored 122.1, and an exact compare flagged
+  // every such row as an update on every Pull, forever.
   if (col.price >= 0) {
     const price = numCell(cell(col.price))
-    if (price !== undefined && v.price !== price) return true
+    if (price !== undefined && !numbersMatch(v.price, price)) return true
   }
   // The optional price types: a blank cell means "cleared" (null), matching the
   // importer, so an unset figure left blank in the sheet reads as unchanged.
@@ -208,7 +217,8 @@ function variationRowChanged(
     if (colIndex < 0) return false
     const raw = cell(colIndex)
     const next = raw === '' ? null : numCell(raw) ?? null
-    return next !== current
+    if (next === null || current === null) return next !== current
+    return !numbersMatch(next, current)
   }
   if (priceCellChanged(col.salePrice, v.salePrice)) return true
   if (priceCellChanged(col.rrp, v.retailPrice)) return true
@@ -217,8 +227,10 @@ function variationRowChanged(
   if (col.sku >= 0 && (v.sku ?? null) !== (cell(col.sku) || null)) return true
   if (col.barcode >= 0 && (v.barcode ?? null) !== (cell(col.barcode) || null)) return true
   if (col.supplier >= 0 && (v.supplier ?? null) !== (cell(col.supplier) || null)) return true
-  if (col.stock >= 0 && (v.stockCount ?? null) !== (numCell(cell(col.stock)) ?? null)) return true
-  if (col.weight >= 0 && (v.weight ?? null) !== (numCell(cell(col.weight)) ?? null)) return true
+  const numChanged = (a: number | null, b: number | null): boolean =>
+    a === null || b === null ? a !== b : !numbersMatch(a, b)
+  if (col.stock >= 0 && numChanged(v.stockCount ?? null, numCell(cell(col.stock)) ?? null)) return true
+  if (col.weight >= 0 && numChanged(v.weight ?? null, numCell(cell(col.weight)) ?? null)) return true
   if (col.image >= 0) {
     const urls = parseVariantImages(cell(col.image))
     if (urls.length !== v.imageUrls.length || urls.some((u, i) => u !== v.imageUrls[i])) return true

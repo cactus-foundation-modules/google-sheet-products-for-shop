@@ -1,5 +1,5 @@
 import type { CellValue, SheetCell, FormulaRun } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { canonicalNumber } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
+import { canonicalNumber, numbersMatch } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 
 // Deciding which of the owner's formulas may survive a Push.
 //
@@ -30,21 +30,16 @@ export type PreservedCell = { row: number; col: number; formula: string }
 // sheet row to a product.
 export type KeyStrategy = string[]
 
-// Numbers coming back from a formula are rarely bit-identical to the number the
-// database holds: "=12.5*1.2" evaluates to 15.000000000000002, and a strict
-// comparison against 15 would discard every price formula on every Push. This is
-// a relative tolerance, so it holds at both £3 and £30,000.
-const NUMERIC_TOLERANCE = 1e-9
+// Float tolerance lives in numeric-cell.ts (numbersMatch), shared with the Pull
+// diff: a formula preserved here because its result matches the database within
+// tolerance must read as "unchanged" to the Pull that reads it back, or the two
+// halves of the sync disagree forever about the same cell.
 
 function parseNumber(s: string): number | null {
   const t = s.trim()
   if (t === '') return null
   const n = Number(t)
   return Number.isFinite(n) ? n : null
-}
-
-function numbersMatch(a: number, b: number): boolean {
-  return Math.abs(a - b) <= NUMERIC_TOLERANCE * Math.max(1, Math.abs(a), Math.abs(b))
 }
 
 // Does the formula's current result equal the value the database is about to
