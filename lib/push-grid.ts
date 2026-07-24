@@ -6,7 +6,7 @@ import {
   columnLetter,
   type CellValue,
 } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { planFormulaPreservation, toFormulaRuns, type KeyStrategy } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
+import { orderRowsLikeSheet, planFormulaPreservation, toFormulaRuns, type KeyStrategy } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
 
 // Writing one tab on a Push.
 //
@@ -30,6 +30,9 @@ export type PushGridResult = { rowCount: number; preservedFormulas: number }
 export async function pushGrid(params: {
   spreadsheetId: string
   tab: string
+  // Rebuilt from the database. Data rows are re-ordered to match the sheet's
+  // existing row order before writing (see orderRowsLikeSheet) - the database
+  // gives no stable export order, and a row that moves loses its formulas.
   grid: CellValue[][]
   // How to identify a row, in priority order - see formula-preserve.ts.
   keyStrategies: KeyStrategy[]
@@ -41,13 +44,14 @@ export async function pushGrid(params: {
   // since Pull ignores columns it does not recognise.
   ownsColumn: (header: string) => boolean
 }): Promise<PushGridResult> {
-  const { spreadsheetId, tab, grid, keyStrategies, ownsColumn } = params
+  const { spreadsheetId, tab, keyStrategies, ownsColumn } = params
 
   // Read before writing. A failure here is not swallowed: it would silently turn
   // formula preservation off AND skip the stale-row clear below, leaving orphan
   // rows from deleted products in the tab. The read uses the same credentials as
   // the write that follows, so anything that breaks it breaks the Push anyway.
   const oldGrid = await readGridWithFormulas(spreadsheetId, tab)
+  const grid = orderRowsLikeSheet({ oldGrid, newGrid: params.grid, keyStrategies })
   const preserved = planFormulaPreservation({ oldGrid, newGrid: grid, keyStrategies })
 
   await writeGrid(spreadsheetId, tab, grid)

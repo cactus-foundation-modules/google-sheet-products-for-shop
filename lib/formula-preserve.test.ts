@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { planFormulaPreservation, toFormulaRuns, valuesMatch } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
+import { orderRowsLikeSheet, planFormulaPreservation, toFormulaRuns, valuesMatch } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
 import type { SheetCell, CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
 // Shorthand builders. `v` is a plain value cell, `f` a formula cell with the
@@ -158,6 +158,97 @@ describe('planFormulaPreservation', () => {
     ]
     const newGrid: CellValue[][] = [HEADER, ['A1', 'chair', 'Chair', 15]]
     expect(plan(oldGrid, newGrid)).toEqual([{ row: 1, col: 3, formula: '=D2*1.2' }])
+  })
+})
+
+describe('orderRowsLikeSheet', () => {
+  const order = (oldGrid: SheetCell[][], newGrid: CellValue[][]) =>
+    orderRowsLikeSheet({ oldGrid, newGrid, keyStrategies: KEYS })
+
+  it('restores the sheet order when the export shuffles rows', () => {
+    // The database gives no stable export order (the Variations parent query
+    // shuffled between runs on a live shop) - the sheet's order wins.
+    const oldGrid = [
+      oldHeader,
+      [v('A1'), v('chair'), v('Chair'), f('=D2*1.2', 15)],
+      [v('A2'), v('stool'), v('Stool'), v(9)],
+    ]
+    const newGrid: CellValue[][] = [
+      HEADER,
+      ['A2', 'stool', 'Stool', 9],
+      ['A1', 'chair', 'Chair', 15],
+    ]
+    const reordered = order(oldGrid, newGrid)
+    expect(reordered).toEqual([
+      HEADER,
+      ['A1', 'chair', 'Chair', 15],
+      ['A2', 'stool', 'Stool', 9],
+    ])
+    // And with the order restored, the formula survives the Push.
+    expect(plan(oldGrid, reordered)).toEqual([{ row: 1, col: 3, formula: '=D2*1.2' }])
+  })
+
+  it('appends genuinely new rows at the bottom, in export order', () => {
+    const oldGrid = [oldHeader, [v('A1'), v('chair'), v('Chair'), v(15)]]
+    const newGrid: CellValue[][] = [
+      HEADER,
+      ['A3', 'bench', 'Bench', 30],
+      ['A1', 'chair', 'Chair', 15],
+      ['A2', 'stool', 'Stool', 9],
+    ]
+    expect(order(oldGrid, newGrid)).toEqual([
+      HEADER,
+      ['A1', 'chair', 'Chair', 15],
+      ['A3', 'bench', 'Bench', 30],
+      ['A2', 'stool', 'Stool', 9],
+    ])
+  })
+
+  it('leaves the grid alone when the header does not line up', () => {
+    const shifted = ['sku', 'slug', 'cost_price', 'name', 'price']
+    const oldGrid = [oldHeader, [v('A1'), v('chair'), v('Chair'), v(15)]]
+    const newGrid: CellValue[][] = [shifted, ['A1', 'chair', 4, 'Chair', 15]]
+    expect(order(oldGrid, newGrid)).toBe(newGrid)
+  })
+
+  it('leaves the grid alone for an empty or header-only sheet', () => {
+    const newGrid: CellValue[][] = [HEADER, ['A1', 'chair', 'Chair', 15]]
+    expect(order([], newGrid)).toBe(newGrid)
+    expect(order([oldHeader], newGrid)).toBe(newGrid)
+  })
+
+  it('keeps the first occurrence for a duplicate key and does not lose rows', () => {
+    const oldGrid = [
+      oldHeader,
+      [v('A1'), v('chair'), v('Chair'), v(15)],
+      [v('A1'), v('chair'), v('Chair spare'), v(16)],
+    ]
+    const newGrid: CellValue[][] = [
+      HEADER,
+      ['A1', 'chair', 'Chair', 15],
+      ['A1', 'chair', 'Chair spare', 16],
+    ]
+    const reordered = order(oldGrid, newGrid)
+    expect(reordered).toHaveLength(3)
+    expect(reordered).toEqual(newGrid)
+  })
+
+  it('falls back to slug for rows without a SKU', () => {
+    const oldGrid = [
+      oldHeader,
+      [v(''), v('chair'), v('Chair'), f('=D2*1.2', 15)],
+      [v(''), v('stool'), v('Stool'), v(9)],
+    ]
+    const newGrid: CellValue[][] = [
+      HEADER,
+      ['', 'stool', 'Stool', 9],
+      ['', 'chair', 'Chair', 15],
+    ]
+    expect(order(oldGrid, newGrid)).toEqual([
+      HEADER,
+      ['', 'chair', 'Chair', 15],
+      ['', 'stool', 'Stool', 9],
+    ])
   })
 })
 
