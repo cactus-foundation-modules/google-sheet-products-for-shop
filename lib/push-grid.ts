@@ -15,6 +15,7 @@ import {
   ownerColumnStart,
   spliceBlankColumns,
   planDeletedSheetRows,
+  planFullyBlankRows,
   removeRows,
   toDescendingRowRanges,
   planFormulaPreservation,
@@ -37,7 +38,10 @@ import {
 //   2. Products that have left the catalogue have their sheet ROW deleted, not
 //      just their cells blanked. The pushed rows below a deletion move up either
 //      way; deleting the whole row is what makes the owner's own columns move up
-//      with them, instead of leaving every note beside the wrong product.
+//      with them, instead of leaving every note beside the wrong product. Any row
+//      left over from before this existed - blank in every column, pushed and
+//      owner's alike - is swept away the same way, since there is nothing on it
+//      to lose.
 //   3. Surviving formulas the database still agrees with are written back, and
 //      any whose result no longer matches (a precedent changed in the same push)
 //      are flattened to the plain value so the cell never DISPLAYS a number
@@ -101,7 +105,17 @@ export async function pushGrid(params: {
   // their own) is what carries the owner's columns up with the catalogue, so a
   // note stays beside its own product. Bottom-up, so each delete cannot shift the
   // indices of the ones still to apply.
-  const doomedRows = planDeletedSheetRows({ oldGrid, newGrid: columnsAligned, keyStrategies })
+  //
+  // Folded into the same sweep: rows blank across the WHOLE row (pushed columns
+  // AND the owner's) left over from before row deletion existed - a v0.1.33 Push
+  // blanked a deleted product's pushed cells in place rather than removing the
+  // row, and one with nothing of the owner's on it is a pure gap. Checked across
+  // every column, so a row the owner has written anything into - a note, a
+  // formula, anything - is never touched here.
+  const doomedRows = [...new Set([
+    ...planDeletedSheetRows({ oldGrid, newGrid: columnsAligned, keyStrategies }),
+    ...planFullyBlankRows(oldGrid),
+  ])]
   if (doomedRows.length > 0) {
     if (sheetId === undefined) sheetId = (await getSheetIds(spreadsheetId))[tab]
     if (sheetId !== undefined) {

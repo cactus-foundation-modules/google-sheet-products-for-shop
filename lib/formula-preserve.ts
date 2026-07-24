@@ -194,6 +194,23 @@ export function removeRows(oldGrid: SheetCell[][], rows: number[]): SheetCell[][
   return oldGrid.filter((_, i) => !drop.has(i))
 }
 
+// Rows that carry NOTHING at all - not a pushed value, not a formula, not so
+// much as a character in the owner's own columns. The only way a row like this
+// exists is a leftover: v0.1.33's Push briefly blanked a deleted product's
+// pushed cells in place rather than deleting the row, and an owner who had
+// nothing of their own on that row is left with a genuinely empty one. Checked
+// across the WHOLE row, owner columns included, so this can never discard
+// anything an owner actually wrote - a row with so much as one non-blank cell,
+// anywhere, is left for the identity-based delete (or nothing) to handle.
+export function planFullyBlankRows(oldGrid: SheetCell[][]): number[] {
+  const out: number[] = []
+  for (let r = 1; r < oldGrid.length; r++) {
+    const row = oldGrid[r] ?? []
+    if (row.every((c) => c.value.trim() === '' && c.formula === null)) out.push(r)
+  }
+  return out
+}
+
 // Contiguous [start, end) runs of the given row indices, ordered HIGHEST FIRST.
 // Deleting from the bottom up means each deletion cannot shift the indices of the
 // ones still to be applied.

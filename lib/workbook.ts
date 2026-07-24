@@ -48,6 +48,7 @@ function readmeRows(): string[][] {
     ['- A Push keeps every row where it already sits in this sheet, with brand-new products added at the bottom - so your formulas stay put.'],
     ['- When a product goes, its whole row goes with it - so anything you keep in your own columns alongside moves up with the rest of the row and stays beside the right product.'],
     ['- A formula is still dropped if its row moves, which only happens when a product above it is removed. Nothing is lost but the formula.'],
+    ['- A row left completely empty by an earlier version of this sheet - no product, no note of yours, nothing at all - is tidied away on the next Push. A row with anything of yours on it is never touched.'],
     ['- Columns you add to the RIGHT of the last one we fill in are yours entirely. A Push never writes there and never clears there, so formulas live on - and a new catalogue column is slotted in beside them, never on top.'],
     [''],
     ['THE SLUG COLUMN'],

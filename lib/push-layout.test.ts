@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   planDeletedSheetRows,
+  planFullyBlankRows,
   removeRows,
   toDescendingRowRanges,
   ownerColumnStart,
@@ -108,6 +109,61 @@ describe('planDeletedSheetRows', () => {
     ]
     const newGrid: CellValue[][] = [header, ['S9', 'p9', 'Nine', 90]]
     expect(planDeletedSheetRows({ oldGrid: mismatched, newGrid, keyStrategies: KEYS })).toEqual([])
+  })
+})
+
+describe('planFullyBlankRows', () => {
+  it('finds a row that is blank across every column, pushed and owner\'s', () => {
+    const grid: SheetCell[][] = [
+      [v('sku'), v('slug'), v('name'), v('price'), v('notes')],
+      [v('S1'), v('p1'), v('One'), v('10'), v('keep-1')],
+      // A v0.1.33 leftover: pushed cells blanked, owner's column also blank.
+      [v(''), v(''), v(''), v(''), v('')],
+      [v('S3'), v('p3'), v('Three'), v('30'), v('keep-3')],
+    ]
+    expect(planFullyBlankRows(grid)).toEqual([2])
+  })
+
+  it('leaves a row alone if the owner has anything at all on it', () => {
+    const grid: SheetCell[][] = [
+      [v('sku'), v('slug'), v('name'), v('price'), v('notes')],
+      // Pushed cells blank (product gone) but the owner's own note survives.
+      [v(''), v(''), v(''), v(''), v('do not lose this')],
+    ]
+    expect(planFullyBlankRows(grid)).toEqual([])
+  })
+
+  it('leaves a row alone if it holds a formula, even one evaluating blank', () => {
+    const grid: SheetCell[][] = [
+      [v('sku'), v('slug'), v('name'), v('price')],
+      [v(''), v(''), v(''), f('=IF(FALSE,1,"")', '')],
+    ]
+    expect(planFullyBlankRows(grid)).toEqual([])
+  })
+
+  it('finds nothing on a fully populated sheet', () => {
+    expect(planFullyBlankRows(oldGrid)).toEqual([])
+  })
+})
+
+describe('the delete sweep merges identity-based deletions with the blank-row cleanup', () => {
+  it('a Push plans both a deleted product\'s row and an unrelated leftover gap', () => {
+    const withGap: SheetCell[][] = [
+      [v('sku'), v('slug'), v('name'), v('price'), v('notes')],
+      [v('S1'), v('p1'), v('One'), v('10'), v('keep-1')],
+      [v(''), v(''), v(''), v(''), v('')], // pure leftover gap - no identity, no content
+      [v('S2'), v('p2'), v('Two'), v('20'), v('keep-2')],
+      [v('S3'), v('p3'), v('Three'), v('30'), v('keep-3')],
+    ]
+    // P2 removed in the admin.
+    const newGrid: CellValue[][] = [header, ['S1', 'p1', 'One', 10], ['S3', 'p3', 'Three', 30]]
+    const doomed = [...new Set([
+      ...planDeletedSheetRows({ oldGrid: withGap, newGrid, keyStrategies: KEYS }),
+      ...planFullyBlankRows(withGap),
+    ])]
+    expect(doomed.sort((a, b) => a - b)).toEqual([2, 3]) // the gap, then P2's row
+    // Adjacent rows, so they merge into one contiguous delete range.
+    expect(toDescendingRowRanges(doomed)).toEqual([{ start: 2, end: 4 }])
   })
 })
 
