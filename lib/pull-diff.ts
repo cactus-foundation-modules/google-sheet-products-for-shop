@@ -118,10 +118,10 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
   const results: ProductRowResult[] = []
   for (let r = 1; r < productsGrid.length; r++) {
     const row = productsGrid[r] ?? []
-    // A row blank across every pushed column is the placeholder a Push leaves in
-    // place of a deleted product when the owner has columns of their own to the
-    // right (see push-grid). It is not a product: skip it silently rather than
-    // reporting "Missing name" on it forever. Owner columns are ignored here.
+    // A row blank across every pushed column is not a product - a spacer the
+    // owner left, or a gap a v0.1.33 Push blanked in place before deletions
+    // started removing the whole row. Skip it silently rather than reporting
+    // "Missing name" on it forever. Owner columns are ignored here.
     if (compared.every(({ idx }) => (row[idx] ?? '').trim() === '')) continue
     const at = (i: number) => (i >= 0 ? (row[i] ?? '').trim() : '')
     const name = at(nameCol)
@@ -292,9 +292,8 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     const cols = grid[r] ?? []
     const slug = (cols[slugCol] ?? '').trim()
     if (!slug) {
-      // Fully-blank placeholder row (a deleted variant's gap when the owner has
-      // their own columns) - skip silently. Only a row with real content but no
-      // slug is an error.
+      // Fully-blank row (a spacer, or a gap left by a v0.1.33 Push) - skip
+      // silently. Only a row with real content but no slug is an error.
       if (knownVarCols.every((i) => (cols[i] ?? '').trim() === '')) continue
       results.push({ row: r, kind: 'error', reason: 'Missing parent slug' })
       continue

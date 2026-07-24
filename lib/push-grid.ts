@@ -12,9 +12,11 @@ import {
 import {
   orderColumnsLikeSheet,
   orderRowsLikeSheet,
-  layoutRowsAtSheetPositions,
   ownerColumnStart,
   spliceBlankColumns,
+  planDeletedSheetRows,
+  removeRows,
+  toDescendingRowRanges,
   planFormulaPreservation,
   toFormulaRuns,
   valuesMatch,
@@ -32,11 +34,10 @@ import {
 //      say), blank columns are inserted so those columns shift RIGHT instead of
 //      being overwritten (writeGrid at A1 would otherwise land the new column
 //      straight on top of the owner's first one).
-//   2. If the owner has columns of their own to the right, deleted products leave
-//      a blank row IN PLACE rather than compacting the catalogue up - otherwise
-//      every note beside a row below the deletion would end up against the wrong
-//      product. With no owner columns the catalogue compacts as before (tidier,
-//      and the only cost is a formula dropped on a row that genuinely moved).
+//   2. Products that have left the catalogue have their sheet ROW deleted, not
+//      just their cells blanked. The pushed rows below a deletion move up either
+//      way; deleting the whole row is what makes the owner's own columns move up
+//      with them, instead of leaving every note beside the wrong product.
 //   3. Surviving formulas the database still agrees with are written back, and
 //      any whose result no longer matches (a precedent changed in the same push)
 //      are flattened to the plain value so the cell never DISPLAYS a number
@@ -83,9 +84,10 @@ export async function pushGrid(params: {
   // enough room first and mirror the insert into the in-memory old grid.
   const oldHeader = (oldGrid[0] ?? []).map((c) => c.value.trim())
   const collisionAt = ownerColumnStart(oldHeader, newHeaderSet, ownsColumn)
+  let sheetId: number | undefined
   if (collisionAt >= 0 && collisionAt < newWidth) {
     const insertCount = newWidth - collisionAt
-    const sheetId = (await getSheetIds(spreadsheetId))[tab]
+    sheetId = (await getSheetIds(spreadsheetId))[tab]
     if (sheetId !== undefined) {
       await batchUpdate(spreadsheetId, [
         { insertDimension: { range: { sheetId, dimension: 'COLUMNS', startIndex: collisionAt, endIndex: collisionAt + insertCount }, inheritFromBefore: false } },
@@ -94,15 +96,27 @@ export async function pushGrid(params: {
     }
   }
 
-  // (2) Row layout. When the owner has columns of their own, hold each surviving
-  // product at its existing sheet row (blank where one was removed) so those
-  // columns stay aligned; otherwise compact as before.
-  const hasOwnerColumns = ownerColumnStart(
-    (oldGrid[0] ?? []).map((c) => c.value.trim()), newHeaderSet, ownsColumn,
-  ) >= 0
-  const grid = (hasOwnerColumns
-    ? layoutRowsAtSheetPositions({ oldGrid, newGrid: columnsAligned, keyStrategies })
-    : null) ?? orderRowsLikeSheet({ oldGrid, newGrid: columnsAligned, keyStrategies })
+  // (2) Delete the rows of products that have left the catalogue. Deleting the
+  // whole row (rather than blanking it, or letting the pushed cells compact on
+  // their own) is what carries the owner's columns up with the catalogue, so a
+  // note stays beside its own product. Bottom-up, so each delete cannot shift the
+  // indices of the ones still to apply.
+  const doomedRows = planDeletedSheetRows({ oldGrid, newGrid: columnsAligned, keyStrategies })
+  if (doomedRows.length > 0) {
+    if (sheetId === undefined) sheetId = (await getSheetIds(spreadsheetId))[tab]
+    if (sheetId !== undefined) {
+      const id = sheetId
+      await batchUpdate(spreadsheetId, toDescendingRowRanges(doomedRows).map((range) => ({
+        deleteDimension: { range: { sheetId: id, dimension: 'ROWS', startIndex: range.start, endIndex: range.end } },
+      })))
+      oldGrid = removeRows(oldGrid, doomedRows)
+    }
+  }
+
+  // Rows now line up one-for-one with the sheet, so the ordering pass simply
+  // holds each surviving product where the owner already has it and appends
+  // anything genuinely new at the bottom.
+  const grid = orderRowsLikeSheet({ oldGrid, newGrid: columnsAligned, keyStrategies })
 
   const preserved = planFormulaPreservation({ oldGrid, newGrid: grid, keyStrategies })
 
@@ -111,9 +125,9 @@ export async function pushGrid(params: {
   const oldWidth = oldGrid.reduce((m, row) => Math.max(m, row.length), 0)
   const oldRows = oldGrid.length
 
-  // Rows the old catalogue used that this one does not (only reachable when the
-  // catalogue compacted - the position-preserving layout never shrinks the used
-  // rows). Cleared across the pushed columns only.
+  // Rows the old catalogue used that this one does not - what is left after the
+  // row deletions above (a row with no usable identity is never deleted, so it
+  // can still be orphaned down here). Cleared across the pushed columns only.
   if (oldRows > grid.length && newWidth > 0) {
     await clearRange(spreadsheetId, tab, `A${grid.length + 1}:${columnLetter(newWidth - 1)}${oldRows}`)
   }

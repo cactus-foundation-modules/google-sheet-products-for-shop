@@ -122,58 +122,90 @@ export function ownerColumnStart(
   return -1
 }
 
-// Lay the new rows out at the SHEET POSITIONS their products already occupy,
-// leaving a blank row where a product has been removed, and appending genuinely
-// new products after the last existing row. Returns null when the pushed columns
-// do not line up or no key strategy resolves (the caller then falls back to the
-// compacting layout).
+// EVERY identity a row answers to - one per key strategy whose columns are all
+// filled in, rather than just the first (which is what rowKey returns).
 //
-// This is what keeps the owner's own columns aligned when a product is deleted:
-// the plain compacting order shifts every pushed row below the deletion up by
-// one, but the owner's columns to the right do NOT move, so their notes end up
-// beside the wrong product. Holding each surviving product at its existing row
-// keeps both halves of the row together. It also means a surviving row never
-// moves, so its formulas are always preserved.
-export function layoutRowsAtSheetPositions(params: {
+// Deletion is decided on ANY of these matching, not the priority key: a product
+// whose SKU was cleared in the admin still matches on its slug, so it is
+// recognised as "still in the catalogue" instead of being read as deleted and
+// having its whole row (and the owner's notes beside it) removed.
+function rowIdentities(values: string[], strategies: number[][]): string[] {
+  const out: string[] = []
+  for (let s = 0; s < strategies.length; s++) {
+    const cols = strategies[s]!
+    const parts: string[] = []
+    let complete = true
+    for (const col of cols) {
+      const v = (values[col] ?? '').trim()
+      if (v === '') { complete = false; break }
+      parts.push(v)
+    }
+    if (complete) out.push(`${s} ${parts.join(' ')}`)
+  }
+  return out
+}
+
+// Which of the sheet's existing data rows belong to products that have left the
+// catalogue. Returned as 0-based grid row indices, which are also the row indices
+// deleteDimension takes. Empty when the pushed columns do not line up or no key
+// strategy resolves - we never guess at deletion.
+//
+// The caller deletes these rows outright rather than blanking them, so that the
+// owner's own columns to the right move up WITH the catalogue. Blanking in place
+// (or simply letting the pushed rows compact while the owner's columns stayed
+// put) is what left their notes beside the wrong product.
+//
+// A row with no usable identity at all - every key column blank - is NEVER
+// deleted. That is a row the owner is part-way through typing, not a tombstone.
+export function planDeletedSheetRows(params: {
   oldGrid: SheetCell[][]
   newGrid: CellValue[][]
   keyStrategies: KeyStrategy[]
-}): CellValue[][] | null {
+}): number[] {
   const { oldGrid, newGrid, keyStrategies } = params
-  if (oldGrid.length < 2 || newGrid.length < 2) return null
+  if (oldGrid.length < 2 || newGrid.length < 1) return []
 
   const oldHeader = (oldGrid[0] ?? []).map((c) => c.value.trim())
   const newHeader = headerNames(newGrid[0] ?? [])
-  if (!pushedColumnsAligned(oldHeader, newHeader)) return null
+  if (!pushedColumnsAligned(oldHeader, newHeader)) return []
 
   const strategies = resolveStrategyColumns(newHeader, keyStrategies)
-  if (strategies.length === 0) return null
+  if (strategies.length === 0) return []
 
-  const oldIndexByKey = new Map<string, number>()
+  const live = new Set<string>()
+  for (let r = 1; r < newGrid.length; r++) {
+    for (const id of rowIdentities((newGrid[r] ?? []).map((v) => String(v)), strategies)) live.add(id)
+  }
+
+  const doomed: number[] = []
   for (let r = 1; r < oldGrid.length; r++) {
-    const key = rowKey((oldGrid[r] ?? []).map((c) => c.value), strategies)
-    if (key !== null && !oldIndexByKey.has(key)) oldIndexByKey.set(key, r)
+    const ids = rowIdentities((oldGrid[r] ?? []).map((c) => c.value), strategies)
+    if (ids.length === 0) continue // nothing to identify it by - leave it alone
+    if (ids.some((id) => live.has(id))) continue // still in the catalogue
+    doomed.push(r)
   }
+  return doomed
+}
 
-  const width = newHeader.length
-  const blankRow = (): CellValue[] => Array.from({ length: width }, () => '' as CellValue)
-  const oldDataCount = oldGrid.length - 1
-  const placed: Array<CellValue[] | null> = new Array(oldDataCount).fill(null)
-  const appended: CellValue[][] = []
-  for (let i = 1; i < newGrid.length; i++) {
-    const row = newGrid[i]!
-    const key = rowKey(row.map((v) => String(v)), strategies)
-    const oldIndex = key !== null ? oldIndexByKey.get(key) : undefined
-    // Survivor whose old slot is free -> hold its position. Anything else (new
-    // product, or a duplicate key) appends after the last existing row.
-    if (oldIndex !== undefined && placed[oldIndex - 1] === null) placed[oldIndex - 1] = row
-    else appended.push(row)
+// Drop the given 0-based row indices from a grid-with-formulas, mirroring a
+// deleteDimension on the live sheet so the in-memory old grid still matches it.
+export function removeRows(oldGrid: SheetCell[][], rows: number[]): SheetCell[][] {
+  const drop = new Set(rows)
+  return oldGrid.filter((_, i) => !drop.has(i))
+}
+
+// Contiguous [start, end) runs of the given row indices, ordered HIGHEST FIRST.
+// Deleting from the bottom up means each deletion cannot shift the indices of the
+// ones still to be applied.
+export function toDescendingRowRanges(rows: number[]): Array<{ start: number; end: number }> {
+  const sorted = [...new Set(rows)].sort((a, b) => a - b)
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const r of sorted) {
+    const last = ranges[ranges.length - 1]
+    if (last && r === last.end) { last.end = r + 1; continue }
+    ranges.push({ start: r, end: r + 1 })
   }
-
-  const out: CellValue[][] = [newGrid[0]!]
-  for (let i = 0; i < oldDataCount; i++) out.push(placed[i] ?? blankRow())
-  for (const row of appended) out.push(row)
-  return out
+  return ranges.reverse()
 }
 
 // Splice `count` blank columns into every row of a grid-with-formulas at `at`,
