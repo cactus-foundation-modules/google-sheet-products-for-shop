@@ -14,6 +14,9 @@ function asGrid(v: unknown): string[][] | null {
 function asErrors(v: unknown): SyncRowError[] | null {
   return Array.isArray(v) ? (v as SyncRowError[]) : null
 }
+function asNumbers(v: unknown): number[] | null {
+  return Array.isArray(v) ? (v as number[]) : null
+}
 
 function mapJob(r: Record<string, unknown>): PullJob {
   return {
@@ -22,6 +25,8 @@ function mapJob(r: Record<string, unknown>): PullJob {
     phase: r.phase as PullPhase,
     productsGrid: asGrid(r.products_grid),
     variationsGrid: asGrid(r.variations_grid),
+    productsRowMap: asNumbers(r.products_row_map),
+    variationsRowMap: asNumbers(r.variations_row_map),
     deletionPlan: (r.deletion_plan as StoredDeletionPlan | null) ?? null,
     lastPushAt: (r.last_push_at as Date | null) ?? null,
     shopImportJobId: (r.shop_import_job_id as string | null) ?? null,
@@ -45,9 +50,15 @@ function mapJob(r: Record<string, unknown>): PullJob {
   }
 }
 
+// Thrown when the partial unique index (migrations/006) rejects a second RUNNING
+// job - two starts raced past the app-level check. The route turns this into 409.
+export class PullAlreadyRunningError extends Error {}
+
 export async function createPullJob(data: {
   productsGrid: string[][]
   variationsGrid: string[][]
+  productsRowMap: number[]
+  variationsRowMap: number[]
   deletionPlan: StoredDeletionPlan
   lastPushAt: Date | null
   shopImportJobId: string
@@ -56,24 +67,36 @@ export async function createPullJob(data: {
   variationsTotal: number
   runBy: string
 }): Promise<{ id: string }> {
-  const rows = await prisma.$queryRaw<[{ id: string }]>`
-    INSERT INTO "gsp_pull_job" (
-      "products_grid", "variations_grid", "deletion_plan", "last_push_at", "shop_import_job_id",
-      "detected", "products_total", "variations_total", "run_by"
-    ) VALUES (
-      ${JSON.stringify(data.productsGrid)}::jsonb,
-      ${JSON.stringify(data.variationsGrid)}::jsonb,
-      ${JSON.stringify(data.deletionPlan)}::jsonb,
-      ${data.lastPushAt},
-      ${data.shopImportJobId},
-      ${data.detected ? JSON.stringify(data.detected) : null}::jsonb,
-      ${data.productsTotal},
-      ${data.variationsTotal},
-      ${data.runBy}
-    )
-    RETURNING "id"
-  `
-  return rows[0]
+  try {
+    const rows = await prisma.$queryRaw<[{ id: string }]>`
+      INSERT INTO "gsp_pull_job" (
+        "products_grid", "variations_grid", "products_row_map", "variations_row_map",
+        "deletion_plan", "last_push_at", "shop_import_job_id",
+        "detected", "products_total", "variations_total", "run_by"
+      ) VALUES (
+        ${JSON.stringify(data.productsGrid)}::jsonb,
+        ${JSON.stringify(data.variationsGrid)}::jsonb,
+        ${JSON.stringify(data.productsRowMap)}::jsonb,
+        ${JSON.stringify(data.variationsRowMap)}::jsonb,
+        ${JSON.stringify(data.deletionPlan)}::jsonb,
+        ${data.lastPushAt},
+        ${data.shopImportJobId},
+        ${data.detected ? JSON.stringify(data.detected) : null}::jsonb,
+        ${data.productsTotal},
+        ${data.variationsTotal},
+        ${data.runBy}
+      )
+      RETURNING "id"
+    `
+    return rows[0]
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : ''
+    // Postgres 23505 / the index name = the concurrency guard fired.
+    if (msg.includes('gsp_pull_job_one_running') || msg.includes('23505')) {
+      throw new PullAlreadyRunningError('A pull is already in progress.')
+    }
+    throw err
+  }
 }
 
 export async function getPullJob(id: string): Promise<PullJob | null> {

@@ -21,6 +21,7 @@ function mapConnection(r: Record<string, unknown>): GspConnection {
     spreadsheetUrl: (r.spreadsheet_url as string | null) ?? null,
     lastPushAt: (r.last_push_at as Date | null) ?? null,
     lastPullAt: (r.last_pull_at as Date | null) ?? null,
+    lastPushAttemptAt: (r.last_push_attempt_at as Date | null) ?? null,
   }
 }
 
@@ -132,6 +133,31 @@ export async function setSpreadsheet(opts: { spreadsheetId: string; spreadsheetU
 
 export async function stampLastPush(): Promise<void> {
   await prisma.$executeRaw`UPDATE "gsp_connection" SET "last_push_at" = CURRENT_TIMESTAMP WHERE "id" = ${SINGLETON}`
+}
+
+// Bumped after each tab a Push writes. Feeds the edit-guard (see push route) so a
+// half-failed push does not read its own write back as an owner edit, while
+// leaving last_push_at (the deletion baseline) for full-success only.
+export async function stampLastPushAttempt(): Promise<void> {
+  await prisma.$executeRaw`UPDATE "gsp_connection" SET "last_push_attempt_at" = CURRENT_TIMESTAMP WHERE "id" = ${SINGLETON}`
+}
+
+// A short self-expiring lease so two overlapping Pushes cannot interleave their
+// writes. Returns true when this caller holds the lease. releasePushLock clears
+// it; a Push the platform kills just waits out the expiry.
+export async function claimPushLock(leaseMs: number): Promise<boolean> {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE "gsp_connection"
+    SET "push_lock_until" = now() + (${leaseMs}::int4 * interval '1 millisecond'), "updated_at" = CURRENT_TIMESTAMP
+    WHERE "id" = ${SINGLETON}
+      AND ("push_lock_until" IS NULL OR "push_lock_until" < now())
+    RETURNING "id"
+  `
+  return rows.length > 0
+}
+
+export async function releasePushLock(): Promise<void> {
+  await prisma.$executeRaw`UPDATE "gsp_connection" SET "push_lock_until" = NULL WHERE "id" = ${SINGLETON}`.catch(() => {})
 }
 
 export async function stampLastPull(): Promise<void> {

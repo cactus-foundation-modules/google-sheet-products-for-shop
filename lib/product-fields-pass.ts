@@ -12,9 +12,19 @@ import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/
 // matches each row to its product the way the engine does, and hands the row to
 // every product-field provider to apply.
 
-export async function applyProductFieldsPass(grid: string[][]): Promise<{ updated: number; errors: SyncRowError[] }> {
+// `grid` is a header row plus the data rows to process (a whole chunk, so a Pull
+// runs this alongside the products import chunk-by-chunk rather than in one
+// unbounded pass over the entire catalogue). `sheetRowFor(dataIndex)` maps a
+// 0-based data-row index within this grid to the row number the owner sees in
+// their sheet, so a row error points at the right place; it defaults to the
+// header-offset index when no map is supplied.
+export async function applyProductFieldsPass(
+  grid: string[][],
+  opts?: { sheetRowFor?: (dataIndex: number) => number },
+): Promise<{ updated: number; errors: SyncRowError[] }> {
   const errors: SyncRowError[] = []
   let updated = 0
+  const sheetRowFor = opts?.sheetRowFor ?? ((dataIndex: number) => dataIndex + 2)
 
   const providers = await resolveProductFieldProviders()
   if (providers.length === 0 || grid.length < 2) return { updated, errors }
@@ -83,7 +93,7 @@ export async function applyProductFieldsPass(grid: string[][]): Promise<{ update
       try {
         if (await provider.applyImportedRow(info.productId, rowRecord, ctx.get(id))) rowChanged = true
       } catch (err) {
-        errors.push({ row: info.r + 1, reason: err instanceof Error ? err.message : 'Attribute update failed' })
+        errors.push({ row: sheetRowFor(info.r - 1), reason: err instanceof Error ? err.message : 'Attribute update failed' })
       }
     }
     if (rowChanged) updated++

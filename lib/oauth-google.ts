@@ -59,8 +59,19 @@ async function requestToken(body: URLSearchParams): Promise<GoogleTokens> {
     signal: AbortSignal.timeout(15_000),
   })
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Google OAuth token request failed: ${res.status} ${text}`)
+    // Include ONLY Google's error/error_description fields, never the raw body:
+    // a token response body can echo back the client secret or a partial token,
+    // and this message is logged at the call sites. A non-JSON body (a proxy or
+    // quota HTML page) contributes nothing but its status.
+    const text = await res.text().catch(() => '')
+    let detail = ''
+    try {
+      const parsed = JSON.parse(text) as { error?: string; error_description?: string }
+      detail = [parsed.error, parsed.error_description].filter(Boolean).join(': ')
+    } catch {
+      // not JSON - status alone
+    }
+    throw new Error(`Google OAuth token request failed: ${res.status}${detail ? ` (${detail})` : ''}`)
   }
   const data = (await res.json()) as { access_token: string; refresh_token?: string; expires_in: number }
   return {

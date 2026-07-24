@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
+import { hasPermission } from '@/lib/permissions/check'
 import { prisma } from '@/lib/db/prisma'
 import { getSiteUrlOrNull } from '@/lib/config/env'
 import { getOAuthClient, storeTokens } from '@/modules/google-sheet-products-for-shop/lib/db'
@@ -16,6 +17,13 @@ async function settingsRedirect(request: NextRequest, query: string): Promise<Ne
 export async function GET(request: NextRequest) {
   const user = await getSessionFromCookie()
   if (!user) return NextResponse.redirect(new URL('/', request.url))
+  // Same gate as the start route. A bare session is not enough: the OAuth state
+  // is a double-submit cookie the browser's owner controls, so without this a
+  // low-privilege user could complete the flow with their own Google account and
+  // silently rebind the site's connection to it.
+  if (!(await hasPermission(user, 'googlesheets.manage'))) {
+    return settingsRedirect(request, 'oauth=error&reason=forbidden')
+  }
 
   const { searchParams } = request.nextUrl
   const code = searchParams.get('code')

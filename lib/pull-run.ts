@@ -2,7 +2,6 @@ import { processImportJob } from '@/modules/shop/lib/import-engine'
 import { getImportJobById, updateImportJobProgress } from '@/modules/shop/lib/db/import-jobs'
 import { importVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { gridToImportCsv } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
-import { applyStatusPass } from '@/modules/google-sheet-products-for-shop/lib/status-pass'
 import { applyProductFieldsPass } from '@/modules/google-sheet-products-for-shop/lib/product-fields-pass'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
@@ -73,10 +72,20 @@ export async function pullStatus(job: PullJob): Promise<PullStatus> {
 // last variation batch lands (or immediately if there were no variation rows).
 async function finalizePullJob(job: PullJob): Promise<void> {
   // A Stop that lands between the last chunk and here must not produce a
-  // "COMPLETED" pair of audit rows for a pull that was abandoned. updatePullJob
-  // already refuses to write a cancelled job, but the log rows and the last-pull
-  // stamp go through their own writers, so check before any of it.
+  // "COMPLETED" pair of audit rows for a pull that was abandoned.
   if (job.status === 'CANCELLED' || (await getPullJobStatus(job.id)) === 'CANCELLED') return
+  // Claim finalisation exactly once by flipping the status to COMPLETED
+  // atomically. Only the worker that wins the flip writes the audit rows, so a
+  // crash between the log writes and the close - which used to re-run finalize on
+  // the next step and write a second COMPLETED pair - can no longer duplicate
+  // them. The grids are cleared after, in a separate write, so a crash there just
+  // leaves a finished job carrying its snapshot (harmless) rather than lost logs.
+  const claimed = await prisma.$queryRaw<Array<{ id: string }>>`
+    UPDATE "gsp_pull_job" SET "status" = 'COMPLETED', "phase" = 'DONE', "updated_at" = CURRENT_TIMESTAMP
+    WHERE "id" = ${job.id} AND "status" NOT IN ('COMPLETED', 'CANCELLED')
+    RETURNING "id"
+  `
+  if (claimed.length === 0) return
   // Rows the start-of-pull diff proved identical never reached the importers;
   // they are skips all the same, and the audit log should say so.
   await writeSyncLog({
@@ -92,7 +101,7 @@ async function finalizePullJob(job: PullJob): Promise<void> {
     archivedCount: job.varDeleted, errors: job.varErrors ?? [], runBy: job.runBy,
   })
   await stampLastPull()
-  await updatePullJob(job.id, { status: 'COMPLETED', phase: 'DONE', clearGrids: true })
+  await updatePullJob(job.id, { clearGrids: true })
 }
 
 // How long a claimed step lease lasts before another worker may take the job
@@ -120,24 +129,62 @@ const STEP_LEASE_MS = 90_000
 // old xact lock avoided, priced in rather than avoided because a lease survives
 // transaction pooling and a pool of one, which the xact lock did not.
 async function withPullStepLock(jobId: string, fn: () => Promise<void>): Promise<boolean> {
-  const claimed = await prisma.$queryRaw<Array<{ id: string }>>`
+  const claimed = await prisma.$queryRaw<Array<{ step_lease_until: Date }>>`
     UPDATE "gsp_pull_job"
     SET "step_lease_until" = now() + (${STEP_LEASE_MS}::int4 * interval '1 millisecond')
     WHERE "id" = ${jobId}
       AND ("step_lease_until" IS NULL OR "step_lease_until" < now())
-    RETURNING "id"
+    RETURNING "step_lease_until"
   `
-  if (claimed.length === 0) return false
+  const myLease = claimed[0]?.step_lease_until
+  if (!myLease) return false
   try {
     await fn()
   } finally {
-    // Best-effort: a failed release just means the next step waits out the
-    // lease. Never let it mask an error thrown by the step itself.
+    // Best-effort, and scoped to OUR lease: if this step outlived STEP_LEASE_MS
+    // (impossible under Vercel's 60s kill, possible self-hosted/local) another
+    // worker may already hold a fresh lease, and an unconditional clear would
+    // wipe it. Releasing only when the stored expiry is still ours leaves that
+    // other worker's lease intact. Never let a failed release mask a step error.
     await prisma
-      .$executeRaw`UPDATE "gsp_pull_job" SET "step_lease_until" = NULL WHERE "id" = ${jobId}`
+      .$executeRaw`UPDATE "gsp_pull_job" SET "step_lease_until" = NULL WHERE "id" = ${jobId} AND "step_lease_until" = ${myLease}`
       .catch(() => {})
   }
   return true
+}
+
+// Reorder the filtered variation data rows so every row of a parent is
+// contiguous, in first-appearance order, and report where each parent group
+// starts. Slugless rows stay as their own singleton groups (the importer errors
+// on them either way). `sheetRows` carries each row's original sheet row number
+// so error reporting survives the reorder; it defaults to the header-offset index.
+function groupVariationRowsByParent(
+  header: string[],
+  dataRows: string[][],
+  sheetRows: number[] | null,
+): { orderedRows: string[][]; orderedSheetRows: number[]; groupStarts: number[] } {
+  const slugCol = header.findIndex((h) => h.trim().toLowerCase() === 'parent slug')
+  const order: string[] = []
+  const byKey = new Map<string, Array<{ row: string[]; sheetRow: number }>>()
+  dataRows.forEach((row, i) => {
+    const slug = slugCol >= 0 ? (row[slugCol] ?? '').trim() : ''
+    const key = slug || `__blank_${i}`
+    let list = byKey.get(key)
+    if (!list) { list = []; byKey.set(key, list); order.push(key) }
+    list.push({ row, sheetRow: sheetRows?.[i] ?? i + 2 })
+  })
+  const orderedRows: string[][] = []
+  const orderedSheetRows: number[] = []
+  const groupStarts: number[] = []
+  for (const key of order) {
+    groupStarts.push(orderedRows.length)
+    for (const entry of byKey.get(key)!) {
+      orderedRows.push(entry.row)
+      orderedSheetRows.push(entry.sheetRow)
+    }
+  }
+  groupStarts.push(orderedRows.length) // sentinel end boundary
+  return { orderedRows, orderedSheetRows, groupStarts }
 }
 
 // One bounded slice of the Pull, run under the job lock by stepPullJob. Every
@@ -161,22 +208,33 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       let updated = job.prodUpdated
       let skipped = job.prodSkipped
       let errors = job.prodErrors ?? []
+      // Translate a 0-based index into the FILTERED data rows to the row the owner
+      // sees in their sheet, so a row error points at the right place. Falls back
+      // to the filtered position on jobs created before the row map existed.
+      const prodSheetRow = (filteredIndex: number) => job.productsRowMap?.[filteredIndex] ?? (filteredIndex + 2)
       while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
         // Stop pressed since the step began? Leave the cursor where it is and
         // get out - rows already imported stay, the rest are never fed in.
         if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
         const chunk = dataRows.slice(cursor, cursor + PROD_ROW_CHUNK)
+        const subGrid = [header, ...chunk]
         // The engine matches by SKU/slug and diffs before writing, so feeding it
         // header + a slice is idempotent: a re-run chunk is all no-ops.
-        await processImportJob(job.shopImportJobId, gridToImportCsv([header, ...chunk]), adminEmail, null, { notify: false })
+        await processImportJob(job.shopImportJobId, gridToImportCsv(subGrid), adminEmail, null, { notify: false })
         const sj = await getImportJobById(job.shopImportJobId)
         // The engine numbers rows within the chunk it was handed (data row i is
-        // reported as i + 2); shift by the cursor to point at the grid row.
-        const chunkErrors = (sj?.errors ?? []).map((e) => ({ row: cursor + e.row, reason: e.reason }))
+        // reported as i + 2); map that to the owner's sheet row.
+        const chunkErrors = (sj?.errors ?? []).map((e) => ({ row: prodSheetRow(cursor + (e.row - 2)), reason: e.reason }))
+        // Product-level attribute columns the engine cannot see, applied over the
+        // same chunk right after its products exist. This used to be one unbounded
+        // pass over the whole catalogue in the DELETIONS phase - thousands of
+        // changed rows blew the 60s ceiling there; here it rides the products
+        // cursor and time budget like everything else.
+        const attributes = await applyProductFieldsPass(subGrid, { sheetRowFor: (i) => prodSheetRow(cursor + i) })
         created += sj?.createdCount ?? 0
-        updated += sj?.updatedCount ?? 0
+        updated += (sj?.updatedCount ?? 0) + attributes.updated
         skipped += sj?.skippedCount ?? 0
-        errors = [...errors, ...chunkErrors]
+        errors = [...errors, ...chunkErrors, ...attributes.errors]
         cursor += chunk.length
         // The shop job row carried per-chunk figures from the call above; put
         // the running totals back so shop's own import listing reads true.
@@ -192,64 +250,76 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       }
     } else if (job.phase === 'DELETIONS') {
       if (!job.productsGrid || !job.variationsGrid) throw new Error('Pull job is missing its sheet snapshot.')
-      // Status pass (the engine ignores the status column) over the stored grid -
-      // which holds only changed rows, and a changed status is a changed row, so
-      // nothing status-only slips past the filter. Then every deletion from the
-      // plan captured at start against the FULL snapshot: the stored grids are
-      // filtered, and planning from them would delete every skipped row. A job
-      // from before the plan column existed has NULL there and full grids, so the
-      // old planner path still serves it.
-      const status = await applyStatusPass(job.productsGrid)
-      // Product-level attribute columns the import engine cannot see, applied over
-      // the same stored (changed-rows-only) grid the status pass uses.
-      const attributes = await applyProductFieldsPass(job.productsGrid)
+      // Deletes only. The status column is now honoured by shop's import engine
+      // itself, and the product-attribute pass runs alongside the products chunks
+      // - so all that is left here is the deletion plan captured at start against
+      // the FULL snapshot (the stored grids are filtered, and re-planning from
+      // them would delete every skipped row). Both bulk deletes are single
+      // statements, so the phase stays well inside the step budget without a
+      // cursor of its own. A job from before the plan column existed has NULL
+      // there and full grids, so the old planner path still serves it.
       const plan = job.deletionPlan ?? await planPullDeletions(job.productsGrid, job.variationsGrid, job.lastPushAt)
       const productDeletions = await applyProductDeletions(plan.products)
       const variationDeletions = await applyVariationDeletions(plan.variations)
       await updatePullJob(jobId, {
         phase: 'VARIATIONS', status: 'RUNNING', error: null,
-        prodUpdated: job.prodUpdated + status.updated + attributes.updated,
         prodDeleted: productDeletions.deleted,
         varDeleted: variationDeletions.deleted,
-        prodErrors: [...(job.prodErrors ?? []), ...status.errors, ...attributes.errors, ...productDeletions.errors],
+        prodErrors: [...(job.prodErrors ?? []), ...productDeletions.errors],
         varErrors: [...(job.varErrors ?? []), ...variationDeletions.errors],
       })
     } else if (job.phase === 'VARIATIONS') {
       if (!job.variationsGrid) throw new Error('Pull job is missing its variations snapshot.')
       const header = job.variationsGrid[0] ?? []
-      const dataRows = job.variationsGrid.slice(1)
+      // Group the filtered rows so every row of a parent sits together, then chunk
+      // on parent boundaries. The importer's value-rename pass (e.g. "Red" typed
+      // over as "Crimson" down a column) only applies in place when it sees ALL of
+      // a value's variants in one call - and a value belongs to exactly one parent
+      // - so a parent split across two chunks used to fall back to delete-and-
+      // recreate, losing the value id and its swatch. Whole parents per call fixes
+      // that. Ordering is deterministic, so variationsDone still resumes cleanly.
+      const { orderedRows, orderedSheetRows, groupStarts } = groupVariationRowsByParent(header, job.variationsGrid.slice(1), job.variationsRowMap)
       const stepStartedAt = Date.now()
-      // Chunks keep going until the time budget is spent, the cursor written after
-      // every one - so however slow the rows are, each step banks real progress and
-      // the next Continue (or the browser's own loop) resumes from the last chunk,
-      // never from the start of a batch it already half-did.
       let cursor = job.variationsDone
       let created = job.varCreated
       let updated = job.varUpdated
       let errors = job.varErrors ?? []
-      while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+      while (cursor < orderedRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
         // Stop pressed since the step began? Leave the cursor where it is and get
         // out - the rows already imported stay, the rest are simply never fed in.
         if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
-        const chunk = dataRows.slice(cursor, cursor + VAR_ROW_CHUNK)
-        // The importer re-derives options/variants from the DB per call, so feeding
-        // it header + a slice of rows is correct even when a parent's rows straddle
-        // two chunks: the second chunk finds what the first created.
+        // Extend to whole parents until the row target is met - never split a
+        // parent. groupStarts ends with a sentinel = orderedRows.length, so the
+        // last (possibly small) group still gets picked up.
+        let end = cursor
+        for (const start of groupStarts) {
+          if (start <= cursor) continue
+          end = start
+          if (end - cursor >= VAR_ROW_CHUNK) break
+        }
+        if (end <= cursor) end = orderedRows.length
+        const chunk = orderedRows.slice(cursor, end)
         const res = await importVariationsCsv(gridToImportCsv([header, ...chunk]))
-        cursor += chunk.length
+        // Importer numbers a data row as its 1-based CSV row (header = 1, first
+        // data = 2); map back to the owner's sheet row via the ordered map.
+        const chunkErrors = res.errors.map((e) => ({
+          row: e.row >= 2 ? (orderedSheetRows[cursor + (e.row - 2)] ?? e.row) : e.row,
+          reason: e.reason,
+        }))
+        cursor = end
         created += res.created
         updated += res.updated
-        errors = [...errors, ...res.errors]
+        errors = [...errors, ...chunkErrors]
         await updatePullJob(jobId, {
           status: 'RUNNING', error: null,
           variationsDone: cursor,
           varCreated: created,
           varUpdated: updated,
           varErrors: errors,
-          ...(cursor >= dataRows.length ? { phase: 'DONE' } : {}),
+          ...(cursor >= orderedRows.length ? { phase: 'DONE' } : {}),
         })
       }
-      if (cursor >= dataRows.length) {
+      if (cursor >= orderedRows.length) {
         const reloaded = await getPullJob(jobId)
         if (reloaded) await finalizePullJob(reloaded)
       }

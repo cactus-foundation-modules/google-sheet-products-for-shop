@@ -2,14 +2,15 @@ import { NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { createImportJob, markImportJobStarted } from '@/modules/shop/lib/db/import-jobs'
+import { createImportJob, markImportJobStarted, markImportJobCompleted } from '@/modules/shop/lib/db/import-jobs'
+import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { diffProductRows, diffVariationRows, filterGridByDiff } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
-import { createPullJob, getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { createPullJob, getLatestUnfinishedPullJob, PullAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 import type { PullDetected } from '@/modules/google-sheet-products-for-shop/lib/types'
 
@@ -33,6 +34,8 @@ export async function POST() {
 
   // Only one Pull at a time. If an earlier one is paused or failed mid-run, the
   // owner must Continue or cancel it rather than start a second that races it.
+  // This is the fast, friendly check; the real race guard is the partial unique
+  // index (migrations/006), caught below when two starts slip past this together.
   const existing = await getLatestUnfinishedPullJob()
   if (existing) {
     return NextResponse.json(
@@ -60,10 +63,24 @@ export async function POST() {
     return errorResponse(`Your sheet's Products tab is missing these columns: ${missing.join(', ')}. Fix the header row (or reset the sheet) and try again.`, 400)
   }
 
+  // Refuse if the Variations tab has lost its "Parent Slug" header while the shop
+  // still has variants. Without that header the deletion planner cannot recognise
+  // a single variation, so it would read every parent's block as "cleared" and
+  // offer to delete the entire variation catalogue - a confirm dialog the owner
+  // clicks through after legitimate edits. A present header with no data rows is a
+  // genuine "clear them all", and is allowed; a MISSING header is malformed.
+  const varHeader = (variationsGrid[0] ?? []).map((h) => h.trim().toLowerCase())
+  if (!varHeader.includes('parent slug')) {
+    const withVariants = await getProductIdsWithVariations()
+    if (withVariants.length > 0) {
+      return errorResponse('Your sheet\'s Variations tab has lost its "Parent Slug" header. Without it a Pull cannot tell which variations you still have, so it would try to delete all of them. Restore the header row (or reset the sheet) and try again.', 400)
+    }
+  }
+
   // Diff and plan against the FULL snapshot, then keep only the rows with work
   // in them. Failures here mean the comparison fell over, not the sheet - say so.
-  let filteredProducts: string[][]
-  let filteredVariations: string[][]
+  let filteredProducts: { grid: string[][]; sheetRows: number[] }
+  let filteredVariations: { grid: string[][]; sheetRows: number[] }
   let detected: PullDetected
   let plan: Awaited<ReturnType<typeof planPullDeletions>>
   try {
@@ -91,23 +108,41 @@ export async function POST() {
     return errorResponse(`Read the sheet fine, but comparing it with your catalogue failed: ${reason}`, 500)
   }
 
-  const productsTotal = Math.max(filteredProducts.length - 1, 0)
-  const variationsTotal = Math.max(filteredVariations.length - 1, 0)
+  const productsTotal = Math.max(filteredProducts.grid.length - 1, 0)
+  const variationsTotal = Math.max(filteredVariations.grid.length - 1, 0)
 
   // The shop import job carries the products phase and its live per-row progress.
   const { id: shopImportJobId } = await createImportJob({ filename: 'Google Sheet pull', totalRows: productsTotal, createdBy: user.id, columnMap: null })
   await markImportJobStarted(shopImportJobId)
 
-  const { id: pullJobId } = await createPullJob({
-    productsGrid: filteredProducts,
-    variationsGrid: filteredVariations,
-    deletionPlan: plan,
-    lastPushAt: conn.lastPushAt,
-    shopImportJobId,
-    detected,
-    productsTotal, variationsTotal,
-    runBy: user.id,
-  })
+  // If creating the pull job fails - a lost connection, or the concurrency guard
+  // firing on a race - the shop import job we just started must not be left
+  // "running" forever in shop's own listing. Fail it, then surface the reason.
+  let pullJobId: string
+  try {
+    ;({ id: pullJobId } = await createPullJob({
+      productsGrid: filteredProducts.grid,
+      variationsGrid: filteredVariations.grid,
+      productsRowMap: filteredProducts.sheetRows,
+      variationsRowMap: filteredVariations.sheetRows,
+      deletionPlan: plan,
+      lastPushAt: conn.lastPushAt,
+      shopImportJobId,
+      detected,
+      productsTotal, variationsTotal,
+      runBy: user.id,
+    }))
+  } catch (err) {
+    await markImportJobCompleted(shopImportJobId, 'FAILED').catch(() => {})
+    if (err instanceof PullAlreadyRunningError) {
+      const running = await getLatestUnfinishedPullJob()
+      return NextResponse.json(
+        { error: 'A pull is already in progress. Continue or cancel it first.', pullJobId: running?.id },
+        { status: 409 },
+      )
+    }
+    throw err
+  }
 
   return NextResponse.json({ pullJobId, productsTotal, variationsTotal, detected }, { status: 202 })
 }

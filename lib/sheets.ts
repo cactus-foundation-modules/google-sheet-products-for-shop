@@ -234,18 +234,48 @@ export type FormulaRun = { row: number; col: number; formulas: string[] }
 // through writeGrid at RAW, so a product named "=cmd" can never be evaluated.
 export async function writeFormulaRuns(spreadsheetId: string, tab: string, runs: FormulaRun[]): Promise<void> {
   if (runs.length === 0) return
+  const body = JSON.stringify({
+    valueInputOption: 'USER_ENTERED',
+    data: runs.map((run) => ({
+      range: `'${tab}'!${columnLetter(run.col)}${run.row + 1}`,
+      values: [run.formulas],
+    })),
+  })
+  // Unlike every other write in this module, the restore is preceded by a write
+  // that has ALREADY flattened these cells to plain values. A transient 429/5xx
+  // here therefore erases every surviving formula for good, with nothing to try
+  // again from - so this one call gets a small bounded backoff before it gives
+  // up, where the others fail fast. Auth (401) is still handled inside googleFetch.
+  let lastRes: Response | null = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchUpdate`, { method: 'POST', body })
+    if (res.ok) return
+    if (res.status === 429 || res.status >= 500) {
+      lastRes = res
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * 2 ** attempt))
+      continue
+    }
+    await ok(res, 'write formulas') // non-retryable - throws
+    return
+  }
+  await ok(lastRes!, 'write formulas') // retries exhausted - throw the last failure
+}
+
+// values.batchUpdate at RAW for a handful of scattered cells - the flatten-back
+// path when a preserved formula's post-push result no longer matches the database
+// (a precedent changed in the same push). Same RAW guarantee as writeGrid: no
+// cell is ever evaluated.
+export async function writeRawCells(spreadsheetId: string, tab: string, cells: Array<{ row: number; col: number; value: CellValue }>): Promise<void> {
+  if (cells.length === 0) return
   await ok(
     await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchUpdate`, {
       method: 'POST',
       body: JSON.stringify({
-        valueInputOption: 'USER_ENTERED',
-        data: runs.map((run) => ({
-          range: `'${tab}'!${columnLetter(run.col)}${run.row + 1}`,
-          values: [run.formulas],
-        })),
+        valueInputOption: 'RAW',
+        data: cells.map((c) => ({ range: `'${tab}'!${columnLetter(c.col)}${c.row + 1}`, values: [[c.value]] })),
       }),
     }),
-    'write formulas'
+    'flatten formulas'
   )
 }
 

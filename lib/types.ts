@@ -12,6 +12,9 @@ export type GspConnection = {
   spreadsheetUrl: string | null
   lastPushAt: Date | null
   lastPullAt: Date | null
+  // Bumped after every tab a Push writes, so the "sheet edited since we synced"
+  // guard tracks our own partial writes without moving the deletion baseline.
+  lastPushAttemptAt: Date | null
 }
 
 export type SyncDirection = 'PUSH' | 'PULL'
@@ -72,6 +75,11 @@ export type PullJob = {
   phase: PullPhase
   productsGrid: string[][] | null
   variationsGrid: string[][] | null
+  // Original 1-based sheet row number for each kept data row of the grids above,
+  // so a row error points at the owner's sheet, not the filtered snapshot. Null
+  // on jobs created before these existed.
+  productsRowMap: number[] | null
+  variationsRowMap: number[] | null
   deletionPlan: StoredDeletionPlan | null
   lastPushAt: Date | null
   shopImportJobId: string | null

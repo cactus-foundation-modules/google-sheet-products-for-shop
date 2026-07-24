@@ -22,7 +22,10 @@ function typedCell(column: CsvColumn, value: string): CellValue {
   if (value === '') return ''
   if (NUMERIC_CSV_COLUMNS.includes(column)) {
     const n = Number(value)
-    return Number.isNaN(n) ? value : n
+    // isFinite, not !isNaN: Infinity/-Infinity are not NaN but serialise to JSON
+    // null, which values.update reads as "leave the existing cell", silently
+    // keeping a stale sheet value. Fall back to the raw text instead.
+    return Number.isFinite(n) ? n : value
   }
   if (BOOLEAN_CSV_COLUMNS.includes(column)) {
     const lower = value.toLowerCase()
@@ -59,6 +62,16 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
       const cols: Array<{ key: string; label: string }> = []
       for (const { provider } of providers) {
         for (const c of await provider.listColumns(productId)) {
+          // Two providers (or two keys) can present the same visible label. A
+          // sheet column is addressed by its label on the way back in (Pull hands
+          // providers a row keyed by header text), so two same-labelled columns
+          // cannot round-trip - the second would read the first's value. We
+          // therefore merge deterministically on first-seen label (provider order
+          // is stable) and warn, rather than silently emit an ambiguous column.
+          if (cols.some((existing) => existing.label === c.label && existing.key !== c.key)) {
+            console.warn(`[google-sheet-products-for-shop] duplicate product-field label "${c.label}" - keeping the first; give the fields distinct labels to sync both.`)
+            continue
+          }
           cols.push({ key: c.key, label: c.label })
           if (!fieldHeaderOrder.includes(c.label)) fieldHeaderOrder.push(c.label)
         }

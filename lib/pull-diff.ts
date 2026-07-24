@@ -118,6 +118,11 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
   const results: ProductRowResult[] = []
   for (let r = 1; r < productsGrid.length; r++) {
     const row = productsGrid[r] ?? []
+    // A row blank across every pushed column is the placeholder a Push leaves in
+    // place of a deleted product when the owner has columns of their own to the
+    // right (see push-grid). It is not a product: skip it silently rather than
+    // reporting "Missing name" on it forever. Owner columns are ignored here.
+    if (compared.every(({ idx }) => (row[idx] ?? '').trim() === '')) continue
     const at = (i: number) => (i >= 0 ? (row[i] ?? '').trim() : '')
     const name = at(nameCol)
     const type = at(typeCol).toUpperCase()
@@ -271,6 +276,10 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
   }
   const idCol = idx('Variant ID')
 
+  // The module's own columns, used to tell a genuine "no parent slug" error from a
+  // fully-blank placeholder row a Push leaves for a deleted variant.
+  const knownVarCols = [slugCol, idCol, ...optionPairs.flatMap((p) => [p.nameCol, p.valueCol]), ...Object.values(fieldCol)].filter((i) => i >= 0)
+
   const allProviders = await resolveVariantFieldProviders()
   const providers = allProviders.filter((p) => typeof p.provider.rowChanged === 'function')
   // A provider that owns columns but cannot say whether a row would change them
@@ -283,6 +292,10 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     const cols = grid[r] ?? []
     const slug = (cols[slugCol] ?? '').trim()
     if (!slug) {
+      // Fully-blank placeholder row (a deleted variant's gap when the owner has
+      // their own columns) - skip silently. Only a row with real content but no
+      // slug is an error.
+      if (knownVarCols.every((i) => (cols[i] ?? '').trim() === '')) continue
       results.push({ row: r, kind: 'error', reason: 'Missing parent slug' })
       continue
     }
@@ -368,9 +381,22 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
 // Pull stores and feeds to the importers: creates, updates and error rows all go
 // through (the importer reports its own row errors, exactly as before); rows
 // that match the shop cell-for-cell are the only thing dropped.
-export function filterGridByDiff(grid: string[][], results: Array<{ row: number; kind: string }>): string[][] {
+//
+// `sheetRows` carries the original 1-based sheet row number of each kept data
+// row (aligned with the returned grid's data rows), so an error the Pull reports
+// against the filtered grid can be translated back to the row the owner sees.
+export function filterGridByDiff(
+  grid: string[][],
+  results: Array<{ row: number; kind: string }>,
+): { grid: string[][]; sheetRows: number[] } {
   const keep = new Set(results.filter((r) => r.kind !== 'unchanged').map((r) => r.row))
   const out: string[][] = [grid[0] ?? []]
-  for (let r = 1; r < grid.length; r++) if (keep.has(r)) out.push(grid[r] ?? [])
-  return out
+  const sheetRows: number[] = []
+  for (let r = 1; r < grid.length; r++) {
+    if (keep.has(r)) {
+      out.push(grid[r] ?? [])
+      sheetRows.push(r + 1) // grid index r -> sheet row r+1 (row 0 is the header)
+    }
+  }
+  return { grid: out, sheetRows }
 }

@@ -48,7 +48,10 @@ export async function buildVariationsGrid(): Promise<CellValue[][]> {
       if (r === 0 || unguarded === '') return unguarded
       if (numeric[c]) {
         const n = Number(unguarded)
-        return Number.isNaN(n) ? unguarded : n
+        // isFinite, not !isNaN: Infinity serialises to JSON null, which
+        // values.update treats as "leave the existing cell" - a stale value would
+        // survive silently. Fall back to the raw text instead.
+        return Number.isFinite(n) ? n : unguarded
       }
       if (open[c]) return coerceOpenCell(unguarded)
       return unguarded
