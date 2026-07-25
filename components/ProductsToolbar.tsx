@@ -588,7 +588,14 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
   const totalRows = p ? p.toCreate.length + p.toUpdate.length + p.unchanged + (preview?.variations.toCreate ?? 0) + (preview?.variations.toUpdate.length ?? 0) + (preview?.variations.unchanged ?? 0) : 0
   const unchangedTotal = (p?.unchanged ?? 0) + (preview?.variations.unchanged ?? 0)
   const changedTotal = totalRows - unchangedTotal
-  const nothingToDo = !!p && totalRows > 0 && changedTotal === 0 && deleteCount === 0
+  // Row errors are neither "changed" nor "unchanged" - a row the diff rejected
+  // (e.g. a product left without its required price) creates no work but is not a
+  // clean match either. Left out of this test, a sheet whose only problem is an
+  // error row read as "already matches your shop", hiding the error behind a
+  // Close button - the owner's edit looked silently ignored. Counting errors here
+  // drops through to the confirm view below, which lists them and lets Pull run.
+  const errorCount = (p?.rowErrors.length ?? 0) + (preview?.variations.rowErrors.length ?? 0)
+  const nothingToDo = !!p && totalRows > 0 && changedTotal === 0 && deleteCount === 0 && errorCount === 0
   return (
     <Modal title={title} onClose={onClose}>
       {loadErr ? (
