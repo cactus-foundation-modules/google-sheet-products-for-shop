@@ -2,6 +2,7 @@ import { CSV_COLUMNS, type CsvColumn } from '@/modules/shop/lib/csv'
 import { buildProductCsvRows, type ProductCsvRow } from '@/modules/shop/lib/csv-rows'
 import { slugify } from '@/modules/shop/lib/slug'
 import { getProductsBySlugs } from '@/modules/shop/lib/db/products'
+import { buildTaxClassRefIndex } from '@/modules/shop/lib/db/tax-shipping'
 import { getEditorPayloadsBatch, type VariantEditorRow } from '@/modules/shop-variations/lib/variants-service'
 import { parseVariantImages } from '@/modules/shop-variations/lib/csv'
 import { resolveVariantFieldProviders } from '@/modules/shop-variations/lib/variant-field-providers'
@@ -86,6 +87,26 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
     if (idx >= 0) compared.push({ col, idx })
   }
 
+  // Tax class round-trips as a code but an owner may type the name, so the diff
+  // must resolve both sides the same way the importer does - otherwise "VAT" typed
+  // over a "vat" code reads as a change on every Pull (harmless but noisy), or an
+  // already-correct value reads as changed forever. Only loaded when the sheet
+  // carries the column.
+  const taxIndex = header.includes('tax_class') ? await buildTaxClassRefIndex() : null
+  function taxClassEqual(from: string, to: string): boolean {
+    const f = from.trim().toLowerCase()
+    const t = to.trim().toLowerCase()
+    if (f === t) return true
+    if (!taxIndex) return false
+    const fc = taxIndex.get(f)
+    const tc = taxIndex.get(t)
+    // Both resolve to the same class (name vs code) -> equal. A non-empty value
+    // that resolves to nothing never equals the stored one, so the row goes
+    // through and the importer reports the unknown tax class rather than the Pull
+    // silently swallowing it.
+    return !!fc && !!tc && fc.id === tc.id
+  }
+
   const csvRows = await buildProductCsvRows()
   const bySku = new Map<string, ProductCsvRow>()
   const bySlug = new Map<string, ProductCsvRow>()
@@ -150,9 +171,11 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
     for (const { col, idx } of compared) {
       const to = (row[idx] ?? '').trim()
       const from = existing[col]
-      const equal = CASE_INSENSITIVE_COLUMNS.has(col)
-        ? from.trim().toUpperCase() === to.toUpperCase()
-        : sameValue(from, to)
+      const equal = col === 'tax_class'
+        ? taxClassEqual(from, to)
+        : CASE_INSENSITIVE_COLUMNS.has(col)
+          ? from.trim().toUpperCase() === to.toUpperCase()
+          : sameValue(from, to)
       if (!equal) changes.push({ field: col, from, to })
     }
     if (changes.length > 0) { results.push({ row: r, kind: 'update', sku, name, changes }); continue }

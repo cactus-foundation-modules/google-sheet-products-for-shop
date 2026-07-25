@@ -74,6 +74,14 @@ vi.mock('@/modules/shop-variations/lib/variants-service', () => ({
   }]])),
 }))
 vi.mock('@/modules/shop-variations/lib/csv', () => ({ parseVariantImages: (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean) }))
+// One VAT class, reachable by code "vat" or name "VAT" - the two spellings an
+// owner might type. Mirrors buildTaxClassRefIndex's own keying.
+vi.mock('@/modules/shop/lib/db/tax-shipping', () => ({
+  buildTaxClassRefIndex: vi.fn(async () => new Map([
+    ['vat', { id: 'tc-vat', name: 'VAT', code: 'vat' }],
+    ['reduced', { id: 'tc-reduced', name: 'Reduced', code: 'reduced' }],
+  ])),
+}))
 
 // resolveVariantFieldProviders returns the REAL attributes provider, so the diff
 // runs the real rowChanged path.
@@ -148,6 +156,43 @@ describe('diffProductRows - product-level attribute edit', () => {
     productRowChanged.mockResolvedValueOnce(false)
     const results = await diffProductRows([header, rowCells('')])
     expect(results[0]?.kind).toBe('unchanged')
+  })
+})
+
+// Tax class round-trips as a code ("vat") but an owner naturally types the name
+// ("VAT"). The diff must treat the two spellings of the same class as equal (or a
+// Pull re-flags the row forever), yet still flag a genuinely different or unknown
+// value so the row reaches the importer.
+describe('diffProductRows - tax class name vs code', () => {
+  const base = { ...Object.fromEntries(CSV_COLUMNS.map((c) => [c, ''])), name: 'Widget', slug: 'widget', type: 'PHYSICAL', price: '10' } as Record<string, string>
+  const cellsWith = (tax: string) => CSV_COLUMNS.map((c) => (c === 'tax_class' ? tax : base[c] ?? ''))
+
+  it('reads the name "VAT" as unchanged against a stored "vat" code', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([{ ...base, tax_class: 'vat' }])
+    productRowChanged.mockResolvedValueOnce(false)
+    const results = await diffProductRows([[...CSV_COLUMNS], cellsWith('VAT')])
+    expect(results[0]?.kind).toBe('unchanged')
+  })
+
+  it('flags a switch to a different tax class as update', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([{ ...base, tax_class: 'vat' }])
+    productRowChanged.mockResolvedValueOnce(false)
+    const results = await diffProductRows([[...CSV_COLUMNS], cellsWith('Reduced')])
+    expect(results[0]?.kind).toBe('update')
+  })
+
+  it('flags setting a tax class on a product that had none', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([{ ...base, tax_class: '' }])
+    productRowChanged.mockResolvedValueOnce(false)
+    const results = await diffProductRows([[...CSV_COLUMNS], cellsWith('VAT')])
+    expect(results[0]?.kind).toBe('update')
+  })
+
+  it('flags an unknown tax class so the importer can report it', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([{ ...base, tax_class: 'vat' }])
+    productRowChanged.mockResolvedValueOnce(false)
+    const results = await diffProductRows([[...CSV_COLUMNS], cellsWith('GST')])
+    expect(results[0]?.kind).toBe('update')
   })
 })
 
