@@ -158,24 +158,33 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
 
     if (!name) { results.push({ row: r, kind: 'error', reason: 'Missing name' }); continue }
     if (!VALID_TYPE.has(type)) { results.push({ row: r, kind: 'error', reason: `Invalid type "${at(typeCol)}"` }); continue }
-    if (!priceRaw || Number.isNaN(Number(priceRaw)) || Number(priceRaw) < 0) { results.push({ row: r, kind: 'error', reason: 'Missing or invalid price' }); continue }
     if (statusRaw && !VALID_STATUS.has(statusRaw.toUpperCase())) { results.push({ row: r, kind: 'error', reason: `Invalid status "${statusRaw}"` }); continue }
 
     // Same identity the import engine uses: SKU when the row carries one, else
     // the row's own slug (or the slug its name would derive).
     const rowSlug = slugify(at(slugCol) || name)
     const existing = sku ? bySku.get(sku) : bySlug.get(rowSlug)
-    if (!existing) { results.push({ row: r, kind: 'create', sku, name }); continue }
+    if (!existing) {
+      if (!priceRaw || Number.isNaN(Number(priceRaw)) || Number(priceRaw) < 0) { results.push({ row: r, kind: 'error', reason: 'Missing or invalid price' }); continue }
+      results.push({ row: r, kind: 'create', sku, name }); continue
+    }
 
     const changes: Change[] = []
     for (const { col, idx } of compared) {
       const to = (row[idx] ?? '').trim()
       const from = existing[col]
-      const equal = col === 'tax_class'
-        ? taxClassEqual(from, to)
-        : CASE_INSENSITIVE_COLUMNS.has(col)
-          ? from.trim().toUpperCase() === to.toUpperCase()
-          : sameValue(from, to)
+      // A blank price on an EXISTING product is "leave it alone", not a change:
+      // the price column is NOT NULL, so the importer keeps the stored value (a
+      // variable product priced "from £x" carries no meaningful parent price).
+      // Comparing it as a change would flag the row on every Pull, forever, and
+      // the import would no-op it every time.
+      const equal = col === 'price' && to === ''
+        ? true
+        : col === 'tax_class'
+          ? taxClassEqual(from, to)
+          : CASE_INSENSITIVE_COLUMNS.has(col)
+            ? from.trim().toUpperCase() === to.toUpperCase()
+            : sameValue(from, to)
       if (!equal) changes.push({ field: col, from, to })
     }
     if (changes.length > 0) { results.push({ row: r, kind: 'update', sku, name, changes }); continue }

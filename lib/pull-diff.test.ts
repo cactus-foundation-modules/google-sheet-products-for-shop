@@ -196,6 +196,54 @@ describe('diffProductRows - tax class name vs code', () => {
   })
 })
 
+describe('diffProductRows - multi-column products edits', () => {
+  it('flags a row as updated when several editable columns change together', async () => {
+    const base = { ...Object.fromEntries(CSV_COLUMNS.map((c) => [c, ''])), name: 'Chiro Plus High Back Ergonomic Posture 24-Hour Office Chair', slug: 'chiro-plus-high-back-ergonomic-posture-24-hour-office-chair', type: 'PHYSICAL', status: 'ACTIVE', description: 'Chiropractor-approved Chiro High Back posture chair with optional headrest. Fully adjustable ergonomic support for real back relief. Stock or bespoke fabrics.', price: '499', retail_price: '999', cost_price: '456', track_inventory: 'FALSE', out_of_stock_behaviour: 'BLOCK', is_pre_order: 'FALSE', related_mode: 'AUTOMATIC', related_limit: '4', upsell_mode: 'AUTOMATIC', upsell_limit: '4', categories: 'task-operator-chairs|ergonomic-chairs|24-hour-heavy-duty-chairs', image_urls: 'IMAGE:https://media.deskwell.co.uk/media/shop/ergonomic-chairs/chiro-plus-high-back-ergonomic-posture-24-hour-office-chair/chiro-plus-high-back-ergonomic-posture-24-hour-office-chair1.webp|IMAGE:https://media.deskwell.co.uk/media/shop/ergonomic-chairs/chiro-plus-high-back-ergonomic-posture-24-hour-office-chair/chiro-plus-high-back-ergonomic-posture-24-hour-office-chair2.webp', image_alt: '', supplier: 'Seating' } as Record<string, string>
+    buildProductCsvRows.mockResolvedValueOnce([base])
+    productRowChanged.mockResolvedValueOnce(true)
+
+    const edited = { ...base, cost_price: '', tax_class: 'VAT', image_alt: '', supplier: 'Seating', barcode: 'Dynamic' } as Record<string, string>
+    const results = await diffProductRows([[...CSV_COLUMNS, 'Markup'], [...CSV_COLUMNS.map((c) => edited[c] ?? ''), '6']])
+
+    expect(results).toHaveLength(1)
+    expect(results[0]?.kind).toBe('update')
+  })
+})
+
+describe('diffProductRows - blank price on an existing product', () => {
+  // A variable product priced "from £x" off its cheapest variation carries no
+  // meaningful parent price, and the price column is NOT NULL - so a blank price
+  // cell on an EXISTING product means "leave it alone", never an error or a
+  // change. A blank price on a NEW product is still a hard error (nothing to
+  // create it with).
+  const base = { ...Object.fromEntries(CSV_COLUMNS.map((c) => [c, ''])), name: 'Widget', slug: 'widget', type: 'PHYSICAL', price: '10' } as Record<string, string>
+  const cells = (over: Record<string, string>) => CSV_COLUMNS.map((c) => (c in over ? over[c]! : base[c] ?? ''))
+
+  it('reads a blanked price with nothing else changed as unchanged', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([{ ...base }])
+    productRowChanged.mockResolvedValueOnce(false)
+    const results = await diffProductRows([[...CSV_COLUMNS], cells({ price: '' })])
+    expect(results[0]?.kind).toBe('unchanged')
+  })
+
+  it('flags the row as update on other edits but never lists price as a change', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([{ ...base, retail_price: '999' }])
+    productRowChanged.mockResolvedValueOnce(false)
+    const results = await diffProductRows([[...CSV_COLUMNS], cells({ price: '', retail_price: '' })])
+    expect(results[0]?.kind).toBe('update')
+    const changes = (results[0] as { changes: { field: string }[] }).changes
+    expect(changes.some((c) => c.field === 'price')).toBe(false)
+    expect(changes.some((c) => c.field === 'retail_price')).toBe(true)
+  })
+
+  it('still errors a blank price on a product that does not exist yet', async () => {
+    buildProductCsvRows.mockResolvedValueOnce([])
+    const results = await diffProductRows([[...CSV_COLUMNS], cells({ name: 'Newthing', slug: 'newthing', price: '' })])
+    expect(results[0]?.kind).toBe('error')
+    expect((results[0] as { reason: string }).reason).toMatch(/price/i)
+  })
+})
+
 // Regression: Push preserves an owner's price formula when its result matches
 // the shop within float tolerance (formula-preserve's numbersMatch), so the
 // sheet legitimately holds 122.10000000000002 where the shop holds 122.1. The
