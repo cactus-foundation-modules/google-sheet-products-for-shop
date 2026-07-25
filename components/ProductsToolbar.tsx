@@ -297,6 +297,7 @@ function PhaseTracker({ phase }: { phase: PullStatus['phase'] }) {
 
 function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullStatus | null; onClose: () => void; onResumableChange: (s: PullStatus | null) => void }) {
   const [preview, setPreview] = useState<Preview | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [loadErr, setLoadErr] = useState<string | null>(null)
   const [status, setStatus] = useState<PullStatus | null>(resumable)
   const [pulling, setPulling] = useState(false)
@@ -373,19 +374,57 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
     }
   }, [startPolling, stopPolling])
 
+  // Re-read the sheet and re-diff it against the shop. The preview is a snapshot,
+  // and the owner routinely edits the sheet in another tab AFTER this dialog first
+  // read it - so it must be re-runnable, not a one-shot on open. Guarded against
+  // overlapping runs so a focus event mid-load does not stack a second read.
+  const loadingRef = useRef(false)
+  const loadPreview = useCallback(async () => {
+    if (loadingRef.current) return
+    loadingRef.current = true
+    setRefreshing(true)
+    setLoadErr(null)
+    try {
+      const res = await fetch(`${BASE}/pull/preview`, { method: 'POST' })
+      const body = await res.json().catch(() => ({}))
+      if (res.ok) setPreview(body.preview)
+      else setLoadErr(failureText(res, body, 'Could not read the sheet.'))
+    } catch {
+      setLoadErr('Could not read the sheet.')
+    } finally {
+      loadingRef.current = false
+      setRefreshing(false)
+    }
+  }, [])
+
   // Load the preview on open, unless we opened straight into a resumable job.
+  // Yield a microtask first so loadPreview's opening setState never runs
+  // synchronously inside the effect (react-hooks/set-state-in-effect).
   useEffect(() => {
     if (resumable) return
     let cancelled = false
-    ;(async () => {
-      const res = await fetch(`${BASE}/pull/preview`, { method: 'POST' })
-      const body = await res.json().catch(() => ({}))
-      if (cancelled) return
-      if (res.ok) setPreview(body.preview)
-      else setLoadErr(failureText(res, body, 'Could not read the sheet.'))
-    })()
+    void (async () => { await Promise.resolve(); if (!cancelled) await loadPreview() })()
     return () => { cancelled = true }
-  }, [resumable])
+  }, [resumable, loadPreview])
+
+  // Re-check whenever the admin tab regains focus while we are still on the
+  // preview (a pull has not started). This is exactly the moment an owner comes
+  // back from editing the sheet - without it, edits made after the dialog opened
+  // stay invisible and the "nothing to pull" message reads as a bug.
+  useEffect(() => {
+    if (resumable) return
+    const recheck = () => {
+      if (document.visibilityState !== 'visible') return
+      if (status || starting || pulling) return // never mid-run
+      void loadPreview()
+    }
+    document.addEventListener('visibilitychange', recheck)
+    window.addEventListener('focus', recheck)
+    return () => {
+      document.removeEventListener('visibilitychange', recheck)
+      window.removeEventListener('focus', recheck)
+    }
+  }, [resumable, status, starting, pulling, loadPreview])
 
   useEffect(() => () => stopPolling(), [stopPolling])
 
@@ -564,9 +603,14 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
         <>
           <p style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Your sheet already matches your shop.</p>
           <p style={{ ...muted, marginBottom: '1rem' }}>
-            Checked {n(totalRows, 'row')} - nothing to create, update, or remove. There is nothing for Pull to do.
+            Checked {n(totalRows, 'row')} - nothing to create, update, or remove. If you have just edited the sheet, use Check again to re-read it.
           </p>
-          <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>Close</button>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadPreview()} disabled={refreshing}>
+              {refreshing ? 'Checking…' : 'Check again'}
+            </button>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onClose} disabled={refreshing}>Close</button>
+          </div>
         </>
       ) : (
         <>
