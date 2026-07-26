@@ -7,6 +7,36 @@ import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-fo
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { buildPullPreview } from '@/modules/google-sheet-products-for-shop/lib/preview'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
+import { CSV_COLUMNS } from '@/modules/shop/lib/csv'
+
+// TEMP DIAGNOSTIC (remove after the Markup/Range pull investigation): dumps, for
+// every Products row the live site just read, exactly what came back from the
+// sheet in the NON-fixed (attribute) columns - so we can see whether the owner's
+// new Markup/Range value actually reached the read the diff runs against. Fixed
+// shop columns are omitted to keep it small. Logged server-side AND returned on
+// the response under `debug`.
+function buildAttributeReadDebug(productsGrid: string[][]) {
+  const header = (productsGrid[0] ?? []).map((h) => h.trim())
+  const fixed = new Set<string>(CSV_COLUMNS)
+  const attrCols = header
+    .map((h, i) => ({ h, i }))
+    .filter(({ h }) => h !== '' && !fixed.has(h.toLowerCase().replace(/\s+/g, '_')))
+  const slugCol = header.findIndex((h) => h.toLowerCase() === 'slug')
+  const nameCol = header.findIndex((h) => h.toLowerCase() === 'name')
+  const rows: Array<{ row: number; slug: string; name: string; attrs: Record<string, string> }> = []
+  for (let r = 1; r < productsGrid.length; r++) {
+    const cells = productsGrid[r] ?? []
+    const attrs: Record<string, string> = {}
+    for (const { h, i } of attrCols) attrs[h] = (cells[i] ?? '').trim()
+    rows.push({
+      row: r + 1,
+      slug: slugCol >= 0 ? (cells[slugCol] ?? '').trim() : '',
+      name: nameCol >= 0 ? (cells[nameCol] ?? '').trim() : '',
+      attrs,
+    })
+  }
+  return { attributeColumns: attrCols.map((c) => c.h), rows }
+}
 
 // Reads both tabs, resolves them against the DB, returns a summary, writes
 // NOTHING. The confirm dialog lists exactly this before POST /pull runs it.
@@ -40,7 +70,22 @@ export async function POST() {
 
   try {
     const preview = await buildPullPreview(productsGrid, variationsGrid, conn)
-    return NextResponse.json({ preview })
+    // TEMP DIAGNOSTIC (remove after the Markup/Range pull investigation).
+    const debug = {
+      sheetRead: buildAttributeReadDebug(productsGrid),
+      // What the diff decided per product, so the sheet read above can be lined
+      // up against the update/unchanged verdict for the same row.
+      productVerdicts: [
+        ...preview.products.toUpdate.map((u) => ({
+          name: u.name,
+          kind: 'update' as const,
+          changes: u.changes.map((c) => `${c.field}: "${c.from}" -> "${c.to}"`),
+        })),
+        { note: `${preview.products.unchanged} product row(s) read as unchanged` },
+      ],
+    }
+    console.error('[gsp/preview][TEMP-DIAG]', JSON.stringify(debug))
+    return NextResponse.json({ preview, debug })
   } catch (err) {
     const reason = err instanceof Error ? err.message : 'Unknown error'
     console.error('[google-sheet-products-for-shop/preview] comparison failed:', reason)
