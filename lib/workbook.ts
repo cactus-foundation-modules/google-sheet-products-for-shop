@@ -1,18 +1,19 @@
 import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, addTab } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
-// The four tabs, in order. Products MUST come before Variations because the
-// Variations importer needs the parent products to already exist (it will not
-// create parents) - the sync handlers enforce the same order in code.
+// The fixed tabs, in order. Variations no longer has a single fixed tab: every
+// variable product gets its OWN tab (created on Push, see ensureVariationTab),
+// sitting between Products and Suppliers. Products MUST come before those product
+// tabs because the Variations importer needs the parent products to already exist
+// (it will not create parents) - the sync handlers enforce the same order.
 //
 // Suppliers is a one-way reference tab: Push writes it, Pull never reads it. It
-// sits after the two catalogue tabs and before the Read me.
+// sits after the catalogue tabs and before the Read me.
 export const TAB = {
   PRODUCTS: 'Products',
-  VARIATIONS: 'Variations',
   SUPPLIERS: 'Suppliers',
   README: 'Read me',
 } as const
-export const TAB_ORDER: string[] = [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIERS, TAB.README]
+export const TAB_ORDER: string[] = [TAB.PRODUCTS, TAB.SUPPLIERS, TAB.README]
 
 // The Suppliers tab was first shipped as "Supplier Catalogues". Workbooks created
 // under the old name are renamed in place on the next Push (see ensureSuppliersTab)
@@ -34,12 +35,17 @@ function readmeRows(): string[][] {
     ['- "Pull from sheet" in the admin overwrites your website with this sheet, after showing you a preview first.'],
     ['- Editing cells here does NOTHING until you press Pull. Nothing here reaches your site on its own.'],
     [''],
+    ['THE PRODUCT TABS'],
+    ['- The Products tab lists every product. Each product that has variations also gets its own tab, named after it.'],
+    ['- A product\'s tab shows only the options that product actually uses, so you are never staring at blank columns meant for some other product.'],
+    ['- Do not rename or delete a product tab by hand. A Pull needs to find it; if it has gone, the Pull stops and asks you to Push again rather than risk removing those variants.'],
+    [''],
     ['THE SUPPLIERS TAB'],
     ['- A read-only list of your suppliers, their discount and the catalogues you have recorded against each one, refreshed on every Push.'],
     ['- Pull never reads it, so editing it changes nothing on your website. Add and edit suppliers and catalogues under Shop, Suppliers.'],
     [''],
     ['ORDER MATTERS'],
-    ['- The Products tab is always synced before the Variations tab, in both directions.'],
+    ['- The Products tab is always synced before the product variation tabs, in both directions.'],
     ['- A variant\'s "Parent Slug" must already exist as a product, or its rows are skipped.'],
     [''],
     ['FORMULAS'],
@@ -62,7 +68,7 @@ function readmeRows(): string[][] {
     ['- Option types created via this sheet default to a dropdown; change the type in the admin if you need something else.'],
     [''],
     ['A NOTE ON COST PRICE'],
-    ['- The cost_price column holds your supplier cost (your margin), and the Variations tab carries the same figure per variant.'],
+    ['- The cost_price column holds your supplier cost (your margin), and each product\'s variation tab carries the same figure per variant.'],
     ['- It is always included, so anyone you share this sheet with can see it. Share the sheet with that in mind.'],
     [''],
     ['IF IT STOPS WORKING AFTER ABOUT A WEEK'],
@@ -124,7 +130,7 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
   await writeGrid(created.spreadsheetId, TAB.README, readmeRows())
 
   const requests: unknown[] = []
-  for (const tab of [TAB.PRODUCTS, TAB.VARIATIONS, TAB.SUPPLIERS]) {
+  for (const tab of [TAB.PRODUCTS, TAB.SUPPLIERS]) {
     const sheetId = created.sheetIds[tab]
     if (sheetId === undefined) continue
     const note = tab === TAB.SUPPLIERS ? REFERENCE_HEADER_NOTE : SYNCED_HEADER_NOTE
@@ -133,6 +139,19 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
   await batchUpdate(created.spreadsheetId, requests)
 
   return { spreadsheetId: created.spreadsheetId, spreadsheetUrl: created.spreadsheetUrl }
+}
+
+// Make sure a product's variation tab exists and is formatted, returning true
+// when it had to be created (so the caller knows a fresh header needs writing).
+// The tab title is a product's, computed by the caller (see variation-tabs.ts).
+// Idempotent: an existing tab is left exactly as it is, formatting and all.
+export async function ensureVariationTab(spreadsheetId: string, title: string): Promise<boolean> {
+  // Slot new product tabs right after Products; Google clamps an out-of-range
+  // index to the end, and existing tabs shift right harmlessly.
+  const sheetId = await addTab(spreadsheetId, title, 1)
+  if (sheetId === null) return false // already there
+  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE))
+  return true
 }
 
 /**

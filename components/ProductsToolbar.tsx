@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PullStatus, PullDetected } from '@/modules/google-sheet-products-for-shop/lib/types'
+import type { PullStatus, PullDetected, PushStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // The Google Sheet controls, injected onto shop's Products page through the
 // `shop.products-toolbar` extension point. A single dropdown (Open / Push / Pull /
@@ -67,11 +67,12 @@ function n(count: number, singular: string, plural?: string): string {
 export function GoogleSheetProductsToolbar() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [modal, setModal] = useState<null | 'pull' | 'logs'>(null)
+  const [modal, setModal] = useState<null | 'push' | 'pull' | 'logs'>(null)
   const [toast, setToast] = useState<string | null>(null)
-  const [busy, setBusy] = useState<string | null>(null)
   // An unfinished Pull found on load (or left after a failure) - offer Continue.
   const [resumable, setResumable] = useState<PullStatus | null>(null)
+  // The same for a Push, which is now a resumable job too.
+  const [resumablePush, setResumablePush] = useState<PushStatus | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
   const loadSettings = useCallback(async () => {
@@ -82,6 +83,8 @@ export function GoogleSheetProductsToolbar() {
   const checkResumable = useCallback(async () => {
     const r = await fetch(`${BASE}/pull/status`).then((x) => (x.ok ? x.json() : null)).catch(() => null)
     setResumable(r?.status && !r.status.done ? r.status : null)
+    const p = await fetch(`${BASE}/push/status`).then((x) => (x.ok ? x.json() : null)).catch(() => null)
+    setResumablePush(p?.status && !p.status.done ? p.status : null)
   }, [])
 
   useEffect(() => {
@@ -112,34 +115,10 @@ export function GoogleSheetProductsToolbar() {
   // Only render once a sheet is actually connected; setup lives in Settings.
   if (!settings || !settings.hasOAuthConnected || !settings.spreadsheetId) return null
 
-  async function push(force = false) {
+  function openPush() {
     setMenuOpen(false)
-    setBusy('push')
-    setToast(null)
-    const res = await fetch(`${BASE}/push`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ force }),
-    })
-    const body = await res.json().catch(() => ({}))
-    setBusy(null)
-    // The sheet was edited since Cactus last synced it. Let the owner decide
-    // whether to overwrite those edits rather than doing it silently.
-    if (res.status === 409 && body.needsConfirm) {
-      if (confirm(`${body.error}\n\nOverwrite the sheet anyway?`)) await push(true)
-      return
-    }
-    const kept = typeof body.formulasKept === 'number' && body.formulasKept > 0
-      ? ` ${body.formulasKept} formula(s) kept.`
-      : ''
-    const suppliers = typeof body.suppliers === 'number' && body.suppliers > 0
-      ? ' Suppliers refreshed.'
-      : ''
-    setToast(res.ok
-      ? `Pushed ${body.products} product(s) and ${body.variations} variant row(s) to the sheet.${suppliers}${kept}`
-      : failureText(res, body, 'Push failed.'))
+    setModal('push')
   }
-
   function openPull() {
     setMenuOpen(false)
     setModal('pull')
@@ -156,10 +135,9 @@ export function GoogleSheetProductsToolbar() {
         className="btn btn-secondary btn-sm"
         aria-haspopup="menu"
         aria-expanded={menuOpen}
-        disabled={busy === 'push'}
         onClick={() => setMenuOpen((o) => !o)}
       >
-        {busy === 'push' ? 'Pushing…' : 'Google Sheet'} <span aria-hidden style={{ fontSize: '0.7em' }}>▾</span>
+        Google Sheet <span aria-hidden style={{ fontSize: '0.7em' }}>▾</span>
       </button>
 
       {menuOpen && (
@@ -172,6 +150,11 @@ export function GoogleSheetProductsToolbar() {
             boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
           }}
         >
+          {resumablePush && (
+            <button type="button" className="gsp-menu-item" style={{ color: 'var(--color-primary)', fontWeight: 600 }} onClick={openPush} role="menuitem">
+              Resume push…
+            </button>
+          )}
           {resumable && (
             <button type="button" className="gsp-menu-item" style={{ color: 'var(--color-primary)', fontWeight: 600 }} onClick={openPull} role="menuitem">
               Resume pull…
@@ -182,7 +165,7 @@ export function GoogleSheetProductsToolbar() {
               Open sheet ↗
             </a>
           )}
-          <button type="button" className="gsp-menu-item" onClick={() => push()} role="menuitem">Push to sheet</button>
+          <button type="button" className="gsp-menu-item" onClick={openPush} role="menuitem">Push to sheet…</button>
           <button type="button" className="gsp-menu-item" onClick={openPull} role="menuitem">Pull from sheet…</button>
           <button type="button" className="gsp-menu-item" onClick={openLogs} role="menuitem">Sheet logs</button>
         </div>
@@ -194,6 +177,13 @@ export function GoogleSheetProductsToolbar() {
         </div>
       )}
 
+      {modal === 'push' && (
+        <PushModal
+          resumable={resumablePush}
+          onClose={() => { setModal(null); void loadSettings(); void checkResumable() }}
+          onResumableChange={setResumablePush}
+        />
+      )}
       {modal === 'pull' && (
         <PullModal
           resumable={resumable}
@@ -699,6 +689,257 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
               {starting ? 'Starting…' : `Pull${deleteCount ? ` and delete ${deleteCount}` : ''}`}
             </button>
             <button type="button" className="btn btn-secondary btn-sm" onClick={onClose} disabled={starting}>Cancel</button>
+          </div>
+        </>
+      )}
+    </Modal>
+  )
+}
+
+// --- Push modal: live progress -> continue -----------------------------------
+
+const PUSH_PHASE_LABEL: Record<PushStatus['phase'], string> = {
+  PRODUCTS: 'Writing your products…',
+  VARIATION_TABS: 'Writing a tab for each product…',
+  CLEANUP: 'Tidying up…',
+  DONE: 'Done',
+}
+const PUSH_PHASE_ORDER: PushStatus['phase'][] = ['PRODUCTS', 'VARIATION_TABS', 'CLEANUP', 'DONE']
+const PUSH_PHASE_SHORT: Record<PushStatus['phase'], string> = {
+  PRODUCTS: 'Products', VARIATION_TABS: 'Product tabs', CLEANUP: 'Tidy up', DONE: 'Done',
+}
+
+function PushPhaseTracker({ phase }: { phase: PushStatus['phase'] }) {
+  const currentIdx = PUSH_PHASE_ORDER.indexOf(phase)
+  return (
+    <div style={{ display: 'flex', gap: '0.4rem', marginBottom: '0.75rem', fontSize: '0.75rem' }}>
+      {(['PRODUCTS', 'VARIATION_TABS', 'CLEANUP'] as const).map((p) => {
+        const idx = PUSH_PHASE_ORDER.indexOf(p)
+        const state = idx < currentIdx ? 'done' : idx === currentIdx ? 'active' : 'pending'
+        return (
+          <div key={p} style={{
+            padding: '0.15rem 0.55rem', borderRadius: '999px',
+            background: state === 'pending' ? 'var(--color-bg-subtle)' : 'var(--color-primary)',
+            color: state === 'pending' ? 'var(--color-text-muted)' : 'var(--color-on-primary)',
+            opacity: state === 'done' ? 0.6 : 1, fontWeight: state === 'active' ? 600 : 400,
+          }}>
+            {state === 'done' ? '✓ ' : ''}{PUSH_PHASE_SHORT[p]}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function PushModal({ resumable, onClose, onResumableChange }: { resumable: PushStatus | null; onClose: () => void; onResumableChange: (s: PushStatus | null) => void }) {
+  const [status, setStatus] = useState<PushStatus | null>(resumable)
+  const [pushing, setPushing] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [loadErr, setLoadErr] = useState<string | null>(null)
+  const pushJobId = useRef<string | null>(resumable?.pushJobId ?? null)
+  const pollRef = useRef<number | null>(null)
+  const looping = useRef(false)
+  const stopRequested = useRef(false)
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current != null) { window.clearInterval(pollRef.current); pollRef.current = null }
+  }, [])
+
+  const startPolling = useCallback((jobId: string) => {
+    stopPolling()
+    pollRef.current = window.setInterval(async () => {
+      const r = await fetch(`${BASE}/push/status?pushJobId=${jobId}`).then((x) => (x.ok ? x.json() : null)).catch(() => null)
+      if (r?.status) setStatus((prev) => (prev?.done ? prev : r.status))
+    }, 1500)
+  }, [stopPolling])
+
+  const MAX_STEP_RETRIES = 5
+
+  const runSteps = useCallback(async (jobId: string) => {
+    if (looping.current) return
+    looping.current = true
+    setPushing(true)
+    setLoadErr(null)
+    startPolling(jobId)
+    const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
+    const progressOf = (s: PushStatus) => `${s.phase}:${s.tabsDone}`
+    let retries = 0
+    let lastProgress: string | null = null
+    try {
+      for (;;) {
+        if (stopRequested.current) break
+        let failReason: string | null = null
+        try {
+          const r = await fetch(`${BASE}/push/step`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pushJobId: jobId }) })
+          const j = await r.json().catch(() => null)
+          if (r.ok && j?.status) {
+            setStatus(j.status)
+            if (j.status.done || j.status.status === 'CANCELLED') break
+            const progress = progressOf(j.status)
+            if (progress !== lastProgress) { lastProgress = progress; retries = 0 }
+            if (j.status.status !== 'FAILED') continue
+            failReason = j.status.error ?? 'The push hit a snag.'
+          } else {
+            failReason = j?.error ?? 'The push could not continue.'
+          }
+        } catch {
+          failReason = 'The connection dropped.'
+        }
+        retries += 1
+        if (retries > MAX_STEP_RETRIES) {
+          setLoadErr(`${failReason} It was retried ${MAX_STEP_RETRIES} times without getting further - press Continue to keep trying, or Cancel.`)
+          break
+        }
+        await sleep(Math.min(2000 * retries, 8000))
+      }
+    } finally {
+      looping.current = false
+      setPushing(false)
+      stopPolling()
+    }
+  }, [startPolling, stopPolling])
+
+  // Kick the push off: POST /push, then loop steps. A 409 with needsConfirm is the
+  // edit guard - ask, then retry with force (looped, not recursed). A 409 with a
+  // job id means one is already under way; resume it rather than starting a second.
+  const startPush = useCallback(async () => {
+    setStarting(true)
+    setLoadErr(null)
+    let force = false
+    for (;;) {
+      const res = await fetch(`${BASE}/push`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ force }) })
+      const body = await res.json().catch(() => ({}))
+      if (res.status === 409 && body.needsConfirm) {
+        setStarting(false)
+        if (confirm(`${body.error}\n\nOverwrite the sheet anyway?`)) { force = true; setStarting(true); continue }
+        onClose()
+        return
+      }
+      setStarting(false)
+      if (res.status === 409 && body.pushJobId) { pushJobId.current = body.pushJobId; if (body.status) setStatus(body.status); await runSteps(body.pushJobId); return }
+      if (!res.ok || !body.pushJobId) { setLoadErr(failureText(res, body, 'Push failed to start.')); return }
+      pushJobId.current = body.pushJobId
+      setStatus({
+        pushJobId: body.pushJobId, status: 'RUNNING', phase: 'PRODUCTS', done: false,
+        tabsTotal: body.tabsTotal ?? 0, tabsDone: 0,
+        counts: { productsRows: 0, variationsRows: 0, suppliersRows: 0, formulasKept: 0 },
+        error: null,
+      })
+      await runSteps(body.pushJobId)
+      return
+    }
+  }, [runSteps, onClose])
+
+  // On open: resume an unfinished push, or start a fresh one. Once per modal open.
+  const began = useRef(false)
+  useEffect(() => {
+    if (began.current) return
+    began.current = true
+    if (resumable) void runSteps(resumable.pushJobId)
+    else void (async () => { await Promise.resolve(); await startPush() })()
+  }, [resumable, runSteps, startPush])
+
+  useEffect(() => () => stopPolling(), [stopPolling])
+
+  // Keep the parent's Continue prompt in step with where we end up.
+  useEffect(() => {
+    if (!status) return
+    onResumableChange(status.done ? null : (status.status === 'FAILED' || status.status === 'RUNNING') ? status : null)
+  }, [status, onResumableChange])
+
+  const abandonPush = useCallback(async (): Promise<PushStatus | null> => {
+    const jobId = pushJobId.current ?? status?.pushJobId
+    stopRequested.current = true
+    stopPolling()
+    if (!jobId) return null
+    const body = await fetch(`${BASE}/push/cancel`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pushJobId: jobId }),
+    }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    onResumableChange(null)
+    return body?.status ?? null
+  }, [status, stopPolling, onResumableChange])
+
+  async function continuePush() {
+    const jobId = pushJobId.current ?? status?.pushJobId
+    stopRequested.current = false
+    if (jobId) await runSteps(jobId)
+  }
+  async function cancelPush() {
+    await abandonPush()
+    onClose()
+  }
+  async function stopPush() {
+    if (!confirm('Stop this push?\n\nTabs already written stay as they are - the rest of the sheet just will not be updated. You can push again whenever you like.')) return
+    setStopping(true)
+    const snapshot = await abandonPush()
+    setStopping(false)
+    setStatus((prev) => snapshot ?? (prev ? { ...prev, status: 'CANCELLED' } : prev))
+  }
+
+  const title = status?.status === 'CANCELLED' ? 'Push stopped' : 'Pushing to your sheet'
+  const c = status?.counts
+  const failed = status?.status === 'FAILED'
+  const cancelled = status?.status === 'CANCELLED'
+
+  return (
+    <Modal title={title} onClose={onClose}>
+      {!status ? (
+        <p style={muted}>{starting ? 'Starting the push…' : 'Preparing…'}</p>
+      ) : (
+        <>
+          {status.done ? (
+            <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Push complete.</p>
+          ) : cancelled && pushing ? (
+            <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Stopping - finishing the tab already under way…</p>
+          ) : cancelled ? (
+            <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>
+              Push stopped. The tabs already written stay as they are; the rest of the sheet was left alone.
+            </p>
+          ) : failed && pushing ? (
+            <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Hit a snag - retrying automatically…</p>
+          ) : failed ? (
+            <p style={{ color: 'var(--color-danger)', fontWeight: 600, marginBottom: '0.75rem' }}>
+              The push stopped: {status.error ?? 'unknown error'}. Nothing is lost - press Continue to pick up where it left off.
+            </p>
+          ) : (
+            <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>{PUSH_PHASE_LABEL[status.phase]}</p>
+          )}
+
+          {!status.done && !cancelled && <PushPhaseTracker phase={status.phase} />}
+
+          <ProgressRow label="Product tabs" done={status.tabsDone} total={status.tabsTotal} />
+
+          {c && (
+            <p style={{ ...muted, fontSize: '0.8125rem', marginTop: '0.75rem' }}>
+              {n(c.productsRows, 'product')} written, {n(c.variationsRows, 'variant row')} across {n(status.tabsDone, 'tab')}.
+              {c.suppliersRows ? ` Suppliers refreshed.` : ''}
+              {c.formulasKept ? ` ${n(c.formulasKept, 'formula')} kept.` : ''}
+            </p>
+          )}
+
+          {loadErr && <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem', marginTop: '0.5rem' }}>{loadErr}</p>}
+
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+            {status.done || (cancelled && !pushing) ? (
+              <button type="button" className="btn btn-primary btn-sm" onClick={onClose}>Close</button>
+            ) : cancelled ? (
+              <span style={muted}>Stopping… this dialog will settle in a moment.</span>
+            ) : pushing ? (
+              <>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={stopPush} disabled={stopping}>
+                  {stopping ? 'Stopping…' : 'Stop push'}
+                </button>
+                <span style={muted}>
+                  {failed ? 'Retrying… stop it if you would rather not wait.' : 'Working… you can leave this open. Closing the tab pauses it - reopen and Continue.'}
+                </span>
+              </>
+            ) : (
+              <>
+                <button type="button" className="btn btn-primary btn-sm" onClick={continuePush}>Continue</button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={cancelPush}>Cancel push</button>
+              </>
+            )}
           </div>
         </>
       )}

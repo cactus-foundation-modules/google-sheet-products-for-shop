@@ -7,6 +7,8 @@ import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/va
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
+import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
+import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { diffProductRows, diffVariationRows, filterGridByDiff } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
@@ -44,13 +46,14 @@ export async function POST() {
     )
   }
 
-  // Read both tabs up front so an auth failure or a mangled header is reported
-  // synchronously, before we create any job or touch the database.
+  // Read the Products tab and merge every per-product variation tab up front, so an
+  // auth failure or a mangled header is reported synchronously, before we create
+  // any job or touch the database.
   let productsGrid: string[][]
   let variationsGrid: string[][]
   try {
     productsGrid = await readGrid(conn.spreadsheetId, TAB.PRODUCTS)
-    variationsGrid = await readGrid(conn.spreadsheetId, TAB.VARIATIONS)
+    variationsGrid = await readMergedVariations(conn.spreadsheetId)
   } catch (err) {
     if (err instanceof GoogleAuthError) return errorResponse(err.message, 400)
     const reason = sheetFailureReason(err)
@@ -63,17 +66,29 @@ export async function POST() {
     return errorResponse(`Your sheet's Products tab is missing these columns: ${missing.join(', ')}. Fix the header row (or reset the sheet) and try again.`, 400)
   }
 
-  // Refuse if the Variations tab has lost its "Parent Slug" header while the shop
-  // still has variants. Without that header the deletion planner cannot recognise
-  // a single variation, so it would read every parent's block as "cleared" and
-  // offer to delete the entire variation catalogue - a confirm dialog the owner
-  // clicks through after legitimate edits. A present header with no data rows is a
-  // genuine "clear them all", and is allowed; a MISSING header is malformed.
-  const varHeader = (variationsGrid[0] ?? []).map((h) => h.trim().toLowerCase())
-  if (!varHeader.includes('parent slug')) {
+  // Manifest guard: with one tab per product, a renamed or deleted product tab
+  // would make its variants vanish from the merged grid - and a Pull would read
+  // that as "these variants were removed" and delete them. So refuse when a product
+  // the last Push recorded is no longer anywhere in the sheet, naming the tab to
+  // restore. A workbook pushed before manifests existed has none, and falls through
+  // to the older backstop below.
+  const manifest = conn.variationTabManifest ?? []
+  if (manifest.length > 0) {
+    const present = slugsInMergedGrid(variationsGrid)
+    const missingSlugs = missingManifestSlugs(manifest.map((m) => m.slug), present)
+    if (missingSlugs.length > 0) {
+      const titles = manifest.filter((m) => missingSlugs.includes(m.slug)).map((m) => `"${m.title}"`)
+      return errorResponse(
+        `These product tabs are missing from your sheet: ${titles.join(', ')}. A tab has been renamed, deleted or emptied since your last Push, so a Pull cannot tell which of those variations you still have - it would try to delete them all. Restore the tab (or Push again) and try again.`,
+        400,
+      )
+    }
+  } else if (((variationsGrid[0] ?? [])[0] ?? '').trim().toLowerCase() !== 'parent slug') {
+    // No manifest and no variation tabs at all: if the shop still has variants,
+    // pulling would read them as "all removed". Refuse until a Push seeds the tabs.
     const withVariants = await getProductIdsWithVariations()
     if (withVariants.length > 0) {
-      return errorResponse('Your sheet\'s Variations tab has lost its "Parent Slug" header. Without it a Pull cannot tell which variations you still have, so it would try to delete all of them. Restore the header row (or reset the sheet) and try again.', 400)
+      return errorResponse('Your sheet has no product variation tabs, so a Pull cannot tell which variations you still have and would try to delete every one. Push to the sheet first, then pull.', 400)
     }
   }
 

@@ -115,12 +115,15 @@ const PRODUCT_KEYS = [['sku'], ['slug']]
 // told apart from one the owner added themselves with certainty.
 const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set(CSV_COLUMNS)
 
-// DB -> Products tab. Returns the number of product rows written (excl. header)
-// and how many of the owner's formulas survived.
-export async function pushProductsTab(
-  spreadsheetId: string
+// Write an already-built Products grid to the Products tab. Split out from
+// buildProductsGrid so a resumable Push can snapshot the grid once at start (for a
+// stable, deterministic re-run) and write it in the PRODUCTS step. Returns the
+// number of product rows written (excl. header) and how many owner formulas
+// survived.
+export async function pushProductsGrid(
+  spreadsheetId: string,
+  grid: CellValue[][],
 ): Promise<{ rowCount: number; preservedFormulas: number }> {
-  const grid = await buildProductsGrid()
   const result = await pushGrid({
     spreadsheetId,
     tab: TAB.PRODUCTS,

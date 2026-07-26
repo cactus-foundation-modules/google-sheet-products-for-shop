@@ -22,6 +22,9 @@ function mapConnection(r: Record<string, unknown>): GspConnection {
     lastPushAt: (r.last_push_at as Date | null) ?? null,
     lastPullAt: (r.last_pull_at as Date | null) ?? null,
     lastPushAttemptAt: (r.last_push_attempt_at as Date | null) ?? null,
+    variationTabManifest: Array.isArray(r.variation_tab_manifest)
+      ? (r.variation_tab_manifest as Array<{ slug: string; title: string }>)
+      : null,
   }
 }
 
@@ -142,24 +145,23 @@ export async function stampLastPushAttempt(): Promise<void> {
   await prisma.$executeRaw`UPDATE "gsp_connection" SET "last_push_attempt_at" = CURRENT_TIMESTAMP WHERE "id" = ${SINGLETON}`
 }
 
-// A short self-expiring lease so two overlapping Pushes cannot interleave their
-// writes. Returns true when this caller holds the lease. releasePushLock clears
-// it; a Push the platform kills just waits out the expiry.
-export async function claimPushLock(leaseMs: number): Promise<boolean> {
-  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
-    UPDATE "gsp_connection"
-    SET "push_lock_until" = now() + (${leaseMs}::int4 * interval '1 millisecond'), "updated_at" = CURRENT_TIMESTAMP
-    WHERE "id" = ${SINGLETON}
-      AND ("push_lock_until" IS NULL OR "push_lock_until" < now())
-    RETURNING "id"
-  `
-  return rows.length > 0
-}
-
-export async function releasePushLock(): Promise<void> {
-  await prisma.$executeRaw`UPDATE "gsp_connection" SET "push_lock_until" = NULL WHERE "id" = ${SINGLETON}`.catch(() => {})
-}
+// The old synchronous Push held a connection-level lease here (push_lock_until) so
+// two overlapping Pushes could not interleave. A Push is now a resumable job, and
+// concurrency is handled by the job's own step lease plus the partial unique index
+// that allows one RUNNING gsp_push_job at a time - so that lease is gone. The
+// push_lock_until column is left in place (harmless, no migration needed).
 
 export async function stampLastPull(): Promise<void> {
   await prisma.$executeRaw`UPDATE "gsp_connection" SET "last_pull_at" = CURRENT_TIMESTAMP WHERE "id" = ${SINGLETON}`
+}
+
+// Record which variation tabs the Push just wrote, so the Pull can refuse when one
+// has since been renamed or deleted (see lib/variation-tabs.ts). Written once, at
+// the end of a successful Push, replacing the previous manifest wholesale.
+export async function setVariationTabManifest(manifest: Array<{ slug: string; title: string }>): Promise<void> {
+  await ensureRow()
+  await prisma.$executeRaw`
+    UPDATE "gsp_connection" SET "variation_tab_manifest" = ${JSON.stringify(manifest)}::jsonb, "updated_at" = CURRENT_TIMESTAMP
+    WHERE "id" = ${SINGLETON}
+  `
 }

@@ -341,6 +341,37 @@ export async function addTab(spreadsheetId: string, title: string, index?: numbe
   return data.replies?.[0]?.addSheet?.properties?.sheetId ?? null
 }
 
+// Delete one or more tabs by sheetId, in a single batchUpdate. Used by a Push to
+// remove the tab of a product that is no longer variable (or one the owner
+// renamed away from the catalogue). A no-op on an empty list.
+export async function deleteSheets(spreadsheetId: string, sheetIds: number[]): Promise<void> {
+  if (sheetIds.length === 0) return
+  await batchUpdate(spreadsheetId, sheetIds.map((sheetId) => ({ deleteSheet: { sheetId } })))
+}
+
+// values.batchGet of the top-left cell (A1) of each named tab, in ONE call, as a
+// map of tab title -> that cell's text ('' when empty). Lets a Push classify the
+// tabs it did not just write - a variation tab carries "Parent Slug" in A1, an
+// owner's own tab does not - without a read per tab.
+export async function readFirstCells(spreadsheetId: string, tabs: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  if (tabs.length === 0) return out
+  const ranges = tabs.map((t) => `ranges=${tabRange(t, 'A1')}`).join('&')
+  const res = await ok(
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`, { method: 'GET' }),
+    'read first cells'
+  )
+  const data = (await res.json()) as { valueRanges?: Array<{ values?: unknown[][] }> }
+  // valueRanges come back in the order the ranges were requested.
+  ;(data.valueRanges ?? []).forEach((vr, i) => {
+    const title = tabs[i]
+    if (title === undefined) return
+    const cell = vr.values?.[0]?.[0]
+    out[title] = cell == null ? '' : String(cell)
+  })
+  return out
+}
+
 // spreadsheets.batchUpdate - formatting and protection.
 export async function batchUpdate(spreadsheetId: string, requests: unknown[]): Promise<void> {
   if (requests.length === 0) return

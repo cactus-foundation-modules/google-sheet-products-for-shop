@@ -3,7 +3,7 @@ import { parseCsv } from '@/modules/shop/lib/csv'
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
-import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
+import { splitWideGridByProduct, type ProductTab } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 
 // The variation columns that hold a number, not text. They go into the sheet as
 // JS numbers for the same reason the Products tab's do (see push-products.ts): a
@@ -83,13 +83,28 @@ function variationKeys(header: string[]): string[][] {
   return [['Variant ID'], ['Variant SKU'], ['Parent Slug', ...optionCols]]
 }
 
-// DB -> Variations tab. Returns the number of variant rows written (excl. header)
-// and how many of the owner's formulas survived.
-export async function pushVariationsTab(spreadsheetId: string): Promise<{ rowCount: number; preservedFormulas: number }> {
-  const grid = await buildVariationsGrid()
+// DB -> per-product variation grids. The wide grid is built exactly as before
+// (all numeric coercion and guard-stripping applied), then split into one narrow
+// grid per product - each carrying only the option and field columns that product
+// uses (see lib/variation-tabs.ts). The Push writes one tab per entry, and a Pull
+// merges them back into the wide shape the pipeline still works off.
+export async function buildVariationTabs(): Promise<ProductTab[]> {
+  const wide = await buildVariationsGrid()
+  return splitWideGridByProduct(wide)
+}
+
+// DB -> one product's variation tab. Returns the number of variant rows written
+// (excl. header) and how many of the owner's formulas survived. Formula
+// preservation, row/column alignment and stale-row clearing all work per tab
+// exactly as they did for the single wide tab - each tab is just narrower.
+export async function pushOneVariationTab(
+  spreadsheetId: string,
+  tabTitle: string,
+  grid: CellValue[][],
+): Promise<{ rowCount: number; preservedFormulas: number }> {
   return pushGrid({
     spreadsheetId,
-    tab: TAB.VARIATIONS,
+    tab: tabTitle,
     grid,
     keyStrategies: variationKeys((grid[0] ?? []).map(String)),
     ownsColumn: (header) => isFixedVariationColumn(header),

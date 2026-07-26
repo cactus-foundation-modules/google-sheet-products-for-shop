@@ -15,6 +15,11 @@ export type GspConnection = {
   // Bumped after every tab a Push writes, so the "sheet edited since we synced"
   // guard tracks our own partial writes without moving the deletion baseline.
   lastPushAttemptAt: Date | null
+  // The variation tabs the last Push wrote, one entry per variable product. The
+  // Pull checks every slug here is still present in the sheet before merging, so a
+  // renamed or deleted tab is caught rather than read as "these variants are gone"
+  // (see lib/variation-tabs.ts missingManifestSlugs). Null before the first Push.
+  variationTabManifest: Array<{ slug: string; title: string }> | null
 }
 
 export type SyncDirection = 'PUSH' | 'PULL'
@@ -100,6 +105,57 @@ export type PullJob = {
   error: string | null
   runBy: string | null
   createdAt: Date
+}
+
+// --- Resumable Push job ----------------------------------------------------
+
+export type PushPhase = 'PRODUCTS' | 'VARIATION_TABS' | 'CLEANUP' | 'DONE'
+export type PushJobStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+// One variable product's tab: the stable slug it is matched by, the display name,
+// the tab title it is written to, and the narrow grid (only its own option and
+// field columns). Built once at Push start and stored on the job.
+export type PushVariationTab = {
+  slug: string
+  name: string
+  title: string
+  grid: (string | number | boolean)[][]
+}
+
+export type PushJob = {
+  id: string
+  status: PushJobStatus
+  phase: PushPhase
+  force: boolean
+  productsGrid: (string | number | boolean)[][] | null
+  variationTabs: PushVariationTab[] | null
+  writtenTitles: string[] | null
+  tabsTotal: number
+  tabsDone: number
+  productsRows: number
+  variationsRows: number
+  suppliersRows: number
+  formulasKept: number
+  error: string | null
+  runBy: string | null
+  createdAt: Date
+}
+
+// The live snapshot the browser polls while a Push runs (and on Continue).
+export type PushStatus = {
+  pushJobId: string
+  status: PushJobStatus
+  phase: PushPhase
+  done: boolean
+  tabsTotal: number
+  tabsDone: number
+  counts: {
+    productsRows: number
+    variationsRows: number
+    suppliersRows: number
+    formulasKept: number
+  }
+  error: string | null
 }
 
 // The live snapshot the browser polls while a Pull runs (and on Continue). All

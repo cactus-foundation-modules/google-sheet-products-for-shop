@@ -5,6 +5,8 @@ import { errorResponse } from '@/lib/utils'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
+import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
+import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { buildPullPreview } from '@/modules/google-sheet-products-for-shop/lib/preview'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 import { CSV_COLUMNS } from '@/modules/shop/lib/csv'
@@ -59,13 +61,29 @@ export async function POST() {
   try {
     ;[productsGrid, variationsGrid] = await Promise.all([
       readGrid(conn.spreadsheetId, TAB.PRODUCTS),
-      readGrid(conn.spreadsheetId, TAB.VARIATIONS),
+      readMergedVariations(conn.spreadsheetId),
     ])
   } catch (err) {
     if (err instanceof GoogleAuthError) return errorResponse(err.message, 400)
     const reason = sheetFailureReason(err)
     console.error('[google-sheet-products-for-shop/preview] sheet read failed:', reason)
     return errorResponse(`Could not read the Google Sheet. ${reason}`, 502)
+  }
+
+  // Same guard the Pull itself uses: a product tab renamed or deleted since the
+  // last Push would read as "these variants are gone". Refuse rather than preview a
+  // mass deletion the owner never intended.
+  const manifest = conn.variationTabManifest ?? []
+  if (manifest.length > 0) {
+    const present = slugsInMergedGrid(variationsGrid)
+    const missingSlugs = missingManifestSlugs(manifest.map((m) => m.slug), present)
+    if (missingSlugs.length > 0) {
+      const titles = manifest.filter((m) => missingSlugs.includes(m.slug)).map((m) => `"${m.title}"`)
+      return errorResponse(
+        `These product tabs are missing from your sheet: ${titles.join(', ')}. A tab has been renamed, deleted or emptied since your last Push. Restore it (or Push again) before pulling.`,
+        400,
+      )
+    }
   }
 
   try {
