@@ -64,7 +64,7 @@ function readmeRows(): string[][] {
     [''],
     ['WHAT IS AND ISN\'T COVERED'],
     ['- Add-ons (extra text/number/checkbox fields on a product) are not in this sheet and are never changed by a sync.'],
-    ['- Colour/image swatches on brand-new option values created via this sheet are not carried across - add those in the admin.'],
+    ['- A value that matches one on the option\'s master list (an attribute) picks up that list\'s colour or picture automatically. A truly new value, on an option with no master list, has no swatch until you add one in the admin.'],
     ['- Option types created via this sheet default to a dropdown; change the type in the admin if you need something else.'],
     [''],
     ['A NOTE ON COST PRICE'],
