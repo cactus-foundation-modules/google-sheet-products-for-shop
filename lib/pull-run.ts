@@ -3,6 +3,7 @@ import { getImportJobById, updateImportJobProgress } from '@/modules/shop/lib/db
 import { importVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { gridToImportCsv } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { applyProductFieldsPass } from '@/modules/google-sheet-products-for-shop/lib/product-fields-pass'
+import { applyDescriptionPuckPass } from '@/modules/google-sheet-products-for-shop/lib/description-puck-pass'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
@@ -231,10 +232,14 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         // changed rows blew the 60s ceiling there; here it rides the products
         // cursor and time budget like everything else.
         const attributes = await applyProductFieldsPass(subGrid, { sheetRowFor: (i) => prodSheetRow(cursor + i) })
+        // The designed-description column, same reasoning: not one of shop's CSV
+        // columns, so the engine cannot see it. Runs after the engine so a row
+        // that creates a product still gets its design.
+        const designs = await applyDescriptionPuckPass(subGrid, { sheetRowFor: (i) => prodSheetRow(cursor + i) })
         created += sj?.createdCount ?? 0
-        updated += (sj?.updatedCount ?? 0) + attributes.updated
+        updated += (sj?.updatedCount ?? 0) + attributes.updated + designs.updated
         skipped += sj?.skippedCount ?? 0
-        errors = [...errors, ...chunkErrors, ...attributes.errors]
+        errors = [...errors, ...chunkErrors, ...attributes.errors, ...designs.errors]
         cursor += chunk.length
         // The shop job row carried per-chunk figures from the call above; put
         // the running totals back so shop's own import listing reads true.

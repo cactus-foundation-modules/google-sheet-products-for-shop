@@ -5,6 +5,7 @@ import { resolveProductFieldProviders } from '@/modules/shop/lib/product-field-p
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
+import { DESCRIPTION_PUCK_COLUMN, descriptionPuckCell } from '@/modules/google-sheet-products-for-shop/lib/description-puck'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
 // The full Products header. Cost price is always included - the owner asked for
@@ -86,10 +87,14 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
     }
   }
 
-  const header: CellValue[] = [...columns.map((c) => c as CellValue), ...fieldHeaderOrder]
+  // The designed description sits between the fixed columns and the open-ended
+  // provider tail: a column this module owns outright, so it keeps a fixed
+  // position rather than being shuffled about with the attribute columns.
+  const header: CellValue[] = [...columns.map((c) => c as CellValue), DESCRIPTION_PUCK_COLUMN, ...fieldHeaderOrder]
   const grid: CellValue[][] = [header]
   for (const row of rows) {
     const base = columns.map((c) => typedCell(c, row[c] ?? ''))
+    const designed = descriptionPuckCell(bySlug.get(row.slug)?.descriptionPuck ?? null)
     const productId = idBySlug.get(row.slug)
     const cols = productId ? colsByProduct.get(productId) ?? [] : []
     const values = productId ? valuesByProduct.get(productId) ?? {} : {}
@@ -101,7 +106,7 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
       const col = cols.find((c) => c.label === label)
       return coerceOpenCell(col ? values[col.key] ?? '' : '')
     })
-    grid.push([...base, ...fieldCells])
+    grid.push([...base, designed, ...fieldCells])
   }
   return grid
 }
@@ -112,8 +117,11 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
 const PRODUCT_KEYS = [['sku'], ['slug']]
 
 // The Products header is a closed set, so a column beyond the pushed grid can be
-// told apart from one the owner added themselves with certainty.
-const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set(CSV_COLUMNS)
+// told apart from one the owner added themselves with certainty. The designed
+// description is ours too, even though it is not one of shop's CSV columns -
+// leave it out and a Push would treat it as the owner's own column, shove it
+// rightwards to make room and then never clear it.
+const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set<string>([...CSV_COLUMNS, DESCRIPTION_PUCK_COLUMN])
 
 // Write an already-built Products grid to the Products tab. Split out from
 // buildProductsGrid so a resumable Push can snapshot the grid once at start (for a
