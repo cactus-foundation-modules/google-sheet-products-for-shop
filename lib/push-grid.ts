@@ -29,7 +29,12 @@ import {
 // This used to be clearTab + writeGrid, which wiped the entire tab - the owner's
 // formulas, and any column they had added to the right of the catalogue with it.
 // Now the write is confined to the rectangle the catalogue actually occupies, and
-// the owner's own rows-below and columns-right are kept aligned with it:
+// the owner's own rows-below and columns-right are kept aligned with it.
+//
+// The rectangle is also laid out the way the OWNER has it, not the way the
+// export happens to build it: rows and columns both take the sheet's existing
+// order, so a catalogue they have sorted or a set of columns they have dragged
+// about survives every Push (see orderColumnsLikeSheet / orderRowsLikeSheet).
 //
 //   1. If the grid has WIDENED into the owner's columns (a new attribute column,
 //      say), blank columns are inserted so those columns shift RIGHT instead of
@@ -47,7 +52,15 @@ import {
 //      are flattened to the plain value so the cell never DISPLAYS a number
 //      different from what the site sells at.
 
-export type PushGridResult = { rowCount: number; preservedFormulas: number }
+export type PushGridResult = {
+  rowCount: number
+  preservedFormulas: number
+  // The header actually written, which is the SHEET's column order rather than
+  // the export's (see orderColumnsLikeSheet). Anything addressing a column by
+  // index afterwards - the Products dropdowns - has to work off this, not off
+  // the canonical list, or it lands on whichever column the owner moved there.
+  header: string[]
+}
 
 export async function pushGrid(params: {
   spreadsheetId: string
@@ -75,10 +88,11 @@ export async function pushGrid(params: {
   // the write that follows, so anything that breaks it breaks the Push anyway.
   let oldGrid = await readGridWithFormulas(spreadsheetId, tab)
 
-  // Columns first: reorder the new grid's open-ended tail to match the sheet the
-  // owner is looking at, so a module update's changed attribute order cannot move
-  // cells out from under their formulas (see orderColumnsLikeSheet).
-  const columnsAligned = orderColumnsLikeSheet({ oldGrid, newGrid: params.grid, ownsColumn })
+  // Columns first: reorder the new grid to match the sheet the owner is looking
+  // at, so neither a module update's changed attribute order nor a column the
+  // owner has dragged somewhere else moves cells out from under their formulas
+  // (see orderColumnsLikeSheet). The sheet's order is what gets written back.
+  const columnsAligned = orderColumnsLikeSheet({ oldGrid, newGrid: params.grid })
   const newWidth = columnsAligned[0]?.length ?? 0
   const newHeaderSet = new Set((columnsAligned[0] ?? []).map((c) => String(c).trim()).filter((h) => h !== ''))
 
@@ -187,5 +201,9 @@ export async function pushGrid(params: {
     }
   }
 
-  return { rowCount: Math.max(grid.length - 1, 0), preservedFormulas: preserved.length - flattened }
+  return {
+    rowCount: Math.max(grid.length - 1, 0),
+    preservedFormulas: preserved.length - flattened,
+    header: (grid[0] ?? []).map((c) => String(c).trim()),
+  }
 }

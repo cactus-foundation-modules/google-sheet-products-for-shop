@@ -57,6 +57,11 @@ function readmeRows(): string[][] {
     ['- A row left completely empty by an earlier version of this sheet - no product, no note of yours, nothing at all - is tidied away on the next Push. A row with anything of yours on it is never touched.'],
     ['- Columns you add to the RIGHT of the last one we fill in are yours entirely. A Push never writes there and never clears there, so formulas live on - and a new catalogue column is slotted in beside them, never on top.'],
     [''],
+    ['MOVING THE COLUMNS ABOUT'],
+    ['- Drag the columns into whatever order suits you. A Pull reads them by their heading, not by where they sit, and a Push puts them back exactly where you left them.'],
+    ['- Rename a heading, though, and that column stops being read at all. Leave the heading row alone and move the whole column instead.'],
+    ['- A column added by a later update arrives at the far right of ours, so nothing you have arranged shuffles along to make room.'],
+    [''],
     ['THE SLUG COLUMN'],
     ['- "slug" is the last part of a product\'s web address. Change it and Pull, and the product moves to the new address.'],
     ['- Leave it alone if you are unsure: anyone linking to the old address will land on nothing.'],
@@ -196,8 +201,9 @@ export async function ensureSuppliersTab(spreadsheetId: string): Promise<void> {
 
 // The in-sheet dropdowns that stop the typo class the import would reject anyway,
 // at the point of typing rather than the point of pulling. Applied on Push,
-// because the exact column positions depend on whether cost_price is present -
-// which Push knows and creation does not.
+// because the column positions are only known once the grid has been laid out
+// against the sheet the owner actually has - they move with a column the owner
+// has dragged somewhere else.
 const VALIDATION_LISTS: Record<string, string[]> = {
   type: ['PHYSICAL', 'DIGITAL', 'SERVICE'],
   status: ['DRAFT', 'ACTIVE', 'ARCHIVED'],
@@ -206,12 +212,27 @@ const VALIDATION_LISTS: Record<string, string[]> = {
   upsell_mode: ['MANUAL', 'AUTOMATIC'],
 }
 
-export async function applyProductsValidation(spreadsheetId: string, columns: string[]): Promise<void> {
-  const sheetIds = await getSheetIds(spreadsheetId)
-  const sheetId = sheetIds[TAB.PRODUCTS]
-  if (sheetId === undefined) return
-
-  const requests: unknown[] = []
+/**
+ * The dropdown requests for one Products tab, given the header ACTUALLY written
+ * (which is the sheet's own column order - see orderColumnsLikeSheet - not the
+ * canonical export order).
+ *
+ * The block is cleared before it is re-applied. A dropdown is a property of the
+ * cells, not of the column label, so a column the owner has dragged elsewhere
+ * would otherwise leave its rule sitting on whatever now occupies the old
+ * position - a "status" list refusing every value the column there accepts. The
+ * clear covers the pushed columns only; the owner's own columns to the right,
+ * and any validation they have put on them, are never touched.
+ */
+export function productsValidationRequests(sheetId: number, columns: string[]): unknown[] {
+  if (columns.length === 0) return []
+  const requests: unknown[] = [
+    {
+      setDataValidation: {
+        range: { sheetId, startRowIndex: 1, endRowIndex: 5000, startColumnIndex: 0, endColumnIndex: columns.length },
+      },
+    },
+  ]
   for (const [column, values] of Object.entries(VALIDATION_LISTS)) {
     const colIndex = columns.indexOf(column)
     if (colIndex < 0) continue
@@ -226,5 +247,12 @@ export async function applyProductsValidation(spreadsheetId: string, columns: st
       },
     })
   }
-  await batchUpdate(spreadsheetId, requests)
+  return requests
+}
+
+export async function applyProductsValidation(spreadsheetId: string, columns: string[]): Promise<void> {
+  const sheetIds = await getSheetIds(spreadsheetId)
+  const sheetId = sheetIds[TAB.PRODUCTS]
+  if (sheetId === undefined) return
+  await batchUpdate(spreadsheetId, productsValidationRequests(sheetId, columns))
 }

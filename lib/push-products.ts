@@ -140,7 +140,8 @@ export async function pushProductsGrid(
     ownsColumn: (header) => PRODUCT_COLUMN_NAMES.has(header),
   })
   // Dropdowns for type/status/out_of_stock_behaviour and the recommendation
-  // modes, positioned for the full column layout.
-  await applyProductsValidation(spreadsheetId, productColumns())
+  // modes, positioned against the header the Push actually wrote - the sheet's
+  // own column order, which is not necessarily the export's.
+  await applyProductsValidation(spreadsheetId, result.header)
   return result
 }

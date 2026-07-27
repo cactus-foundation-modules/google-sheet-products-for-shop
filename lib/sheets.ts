@@ -349,14 +349,15 @@ export async function deleteSheets(spreadsheetId: string, sheetIds: number[]): P
   await batchUpdate(spreadsheetId, sheetIds.map((sheetId) => ({ deleteSheet: { sheetId } })))
 }
 
-// values.batchGet of the top-left cell (A1) of each named tab, in ONE call, as a
-// map of tab title -> that cell's text ('' when empty). Lets a Push classify the
-// tabs it did not just write - a variation tab carries "Parent Slug" in A1, an
-// owner's own tab does not - without a read per tab.
-export async function readFirstCells(spreadsheetId: string, tabs: string[]): Promise<Record<string, string>> {
-  const out: Record<string, string> = {}
+// values.batchGet of the HEADER ROW of each named tab, in ONE call, as a map of
+// tab title -> that row's cells. Lets a Push classify the tabs it did not just
+// write - a variation tab carries a "Parent Slug" column, an owner's own tab
+// does not - without a read per tab. The whole row rather than A1 alone, because
+// the owner may have dragged that column somewhere else.
+export async function readHeaderRows(spreadsheetId: string, tabs: string[]): Promise<Record<string, string[]>> {
+  const out: Record<string, string[]> = {}
   if (tabs.length === 0) return out
-  const ranges = tabs.map((t) => `ranges=${tabRange(t, 'A1')}`).join('&')
+  const ranges = tabs.map((t) => `ranges=${tabRange(t, '1:1')}`).join('&')
   const res = await ok(
     await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`, { method: 'GET' }),
     'read first cells'
@@ -366,8 +367,7 @@ export async function readFirstCells(spreadsheetId: string, tabs: string[]): Pro
   ;(data.valueRanges ?? []).forEach((vr, i) => {
     const title = tabs[i]
     if (title === undefined) return
-    const cell = vr.values?.[0]?.[0]
-    out[title] = cell == null ? '' : String(cell)
+    out[title] = (vr.values?.[0] ?? []).map((cell) => (cell == null ? '' : String(cell)))
   })
   return out
 }

@@ -6,9 +6,11 @@ import {
   toDescendingRowRanges,
   ownerColumnStart,
   spliceBlankColumns,
+  orderColumnsLikeSheet,
   orderRowsLikeSheet,
   planFormulaPreservation,
 } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
+import { productsValidationRequests } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import type { SheetCell, CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
 // `v` is a plain value cell, `f` a formula cell with its current result.
@@ -191,6 +193,65 @@ describe('after the row delete, the catalogue and the owner\'s columns line up',
     // Both survivors line up with their own old row, so both formulas survive.
     const preserved = planFormulaPreservation({ oldGrid: afterDelete, newGrid: grid, keyStrategies: KEYS })
     expect(preserved.map((p) => p.formula).sort()).toEqual(['=15*2', '=5*2'])
+  })
+})
+
+describe('a sheet whose columns the owner has rearranged', () => {
+  // The owner has dragged the catalogue columns into the order they like, kept
+  // their own "notes" column on the right, and sorted the rows themselves. The
+  // Push has to land on that layout, not overwrite it - and everything that
+  // depends on the header lining up (deletions, row order, formulas) has to keep
+  // working once it does.
+  const rearranged: SheetCell[][] = [
+    [v('name'), v('price'), v('slug'), v('sku'), v('notes')],
+    [v('Three'), f('=15*2', 30), v('p3'), v('S3'), v('keep-3')],
+    [v('One'), v('10'), v('p1'), v('S1'), v('keep-1')],
+    [v('Two'), v('20'), v('p2'), v('S2'), v('keep-2')],
+  ]
+  // The export always builds sku, slug, name, price - and P2 has since gone.
+  const exported: CellValue[][] = [header, ['S1', 'p1', 'One', 10], ['S3', 'p3', 'Three', 30]]
+
+  it('writes the owner\'s column order back, not the export\'s', () => {
+    const aligned = orderColumnsLikeSheet({ oldGrid: rearranged, newGrid: exported })
+    expect(aligned[0]).toEqual(['name', 'price', 'slug', 'sku'])
+    expect(aligned[1]).toEqual(['One', 10, 'p1', 'S1'])
+  })
+
+  it('still spots the product that has left the catalogue', () => {
+    const aligned = orderColumnsLikeSheet({ oldGrid: rearranged, newGrid: exported })
+    // Row 3 is P2's. Before the reorder the headers did not line up, so the plan
+    // came back empty and the row was orphaned - notes and all.
+    expect(planDeletedSheetRows({ oldGrid: rearranged, newGrid: aligned, keyStrategies: KEYS })).toEqual([3])
+    expect(planDeletedSheetRows({ oldGrid: rearranged, newGrid: exported, keyStrategies: KEYS })).toEqual([])
+  })
+
+  it('holds the owner\'s row order and keeps their formula', () => {
+    const aligned = orderColumnsLikeSheet({ oldGrid: rearranged, newGrid: exported })
+    const afterDelete = removeRows(rearranged, planDeletedSheetRows({ oldGrid: rearranged, newGrid: aligned, keyStrategies: KEYS }))
+    const grid = orderRowsLikeSheet({ oldGrid: afterDelete, newGrid: aligned, keyStrategies: KEYS })
+    // P3 is at the top in the sheet, so it stays at the top.
+    expect(grid[1]).toEqual(['Three', 30, 'p3', 'S3'])
+    expect(grid[2]).toEqual(['One', 10, 'p1', 'S1'])
+    expect(planFormulaPreservation({ oldGrid: afterDelete, newGrid: grid, keyStrategies: KEYS })).toEqual([
+      { row: 1, col: 1, formula: '=15*2' },
+    ])
+  })
+
+  it('moves the dropdowns to wherever their column now sits', () => {
+    const columns = ['name', 'status', 'slug', 'sku', 'price']
+    type ValidationRequest = {
+      setDataValidation: {
+        range: { sheetId: number; startRowIndex: number; endRowIndex: number; startColumnIndex: number; endColumnIndex: number }
+        rule?: unknown
+      }
+    }
+    const requests = productsValidationRequests(7, columns) as ValidationRequest[]
+    // The block is cleared first, or the rule left behind on the column status
+    // used to occupy would reject every value the column there now holds.
+    expect(requests[0]!.setDataValidation.rule).toBeUndefined()
+    expect(requests[0]!.setDataValidation.range).toMatchObject({ startColumnIndex: 0, endColumnIndex: 5 })
+    const status = requests.filter((r) => r.setDataValidation.rule).map((r) => r.setDataValidation.range)
+    expect(status).toEqual([{ sheetId: 7, startRowIndex: 1, endRowIndex: 5000, startColumnIndex: 1, endColumnIndex: 2 }])
   })
 })
 

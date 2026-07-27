@@ -76,13 +76,19 @@ export function productTabTitle(name: string, slug: string, taken: Set<string>):
   }
 }
 
-// A tab is a variation tab if its title is not reserved and its first header cell
-// is "Parent Slug" - the same structural marker the old single tab carried. Used
+// A tab is a variation tab if its title is not reserved and its header carries
+// "Parent Slug" - the same structural marker the old single tab had in A1. Used
 // to pick the catalogue tabs out of a workbook that also holds Products,
 // Suppliers, Read me and anything the owner added.
+//
+// The marker is looked for ACROSS the header, not just in A1: the owner is free
+// to drag these columns into whatever order suits them (a Push writes their
+// order back rather than the export's), and a tab whose Parent Slug had moved to
+// column D would otherwise stop being recognised as a catalogue tab at all -
+// which reads as "the tab has gone" and stops the Pull.
 export function isVariationTab(title: string, header: readonly string[]): boolean {
   if (RESERVED_TAB_TITLES.has(title)) return false
-  return (header[0] ?? '').trim() === SLUG_HEADER
+  return header.some((h) => (h ?? '').trim() === SLUG_HEADER)
 }
 
 // Column layout of a wide/narrow variation header. Positions are looked up by

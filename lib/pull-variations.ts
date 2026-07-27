@@ -1,7 +1,7 @@
 import { importVariationsCsv, type ImportResult } from '@/modules/shop-variations/lib/csv'
 import { gridToImportCsv } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { getSheetIds, readGrid } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { RESERVED_TAB_TITLES, mergeVariationTabs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
+import { RESERVED_TAB_TITLES, isVariationTab, mergeVariationTabs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 
 // Sheet grid -> shop-variations' importer. importVariationsCsv groups rows by
 // parent slug, auto-creates any option/value it hasn't seen, and matches variants
@@ -33,16 +33,17 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 
 // Read every per-product variation tab and merge them into the single wide grid
 // the Pull pipeline works off - the exact shape the old single "Variations" tab
-// produced. A variation tab is any non-reserved tab carrying "Parent Slug" in A1;
-// the owner's own tabs (no such marker) are read but discarded, so an added notes
-// tab never breaks a Pull. Returns [] when there are no variation tabs at all
-// (an all-simple catalogue), which the pipeline reads as "no variations".
+// produced. A variation tab is any non-reserved tab whose header carries "Parent
+// Slug" (anywhere, not just A1 - the owner may have rearranged the columns); the
+// owner's own tabs, having no such marker, are read but discarded, so an added
+// notes tab never breaks a Pull. Returns [] when there are no variation tabs at
+// all (an all-simple catalogue), which the pipeline reads as "no variations".
 export async function readMergedVariations(spreadsheetId: string): Promise<string[][]> {
   const ids = await getSheetIds(spreadsheetId)
   const candidates = Object.keys(ids).filter((t) => !RESERVED_TAB_TITLES.has(t))
   if (candidates.length === 0) return []
   const grids = await mapLimit(candidates, READ_CONCURRENCY, (t) => readGrid(spreadsheetId, t))
-  const variationGrids = grids.filter((g) => ((g[0] ?? [])[0] ?? '').trim() === 'Parent Slug')
+  const variationGrids = grids.filter((g, i) => isVariationTab(candidates[i]!, g[0] ?? []))
   if (variationGrids.length === 0) return []
   return mergeVariationTabs(variationGrids)
 }

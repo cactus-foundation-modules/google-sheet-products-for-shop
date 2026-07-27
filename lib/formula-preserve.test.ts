@@ -162,10 +162,8 @@ describe('planFormulaPreservation', () => {
 })
 
 describe('orderColumnsLikeSheet', () => {
-  const OWNED = new Set(HEADER) // sku, slug, name, price - the fixed block
-  const owns = (h: string) => OWNED.has(h)
   const orderCols = (oldGrid: SheetCell[][], newGrid: CellValue[][]) =>
-    orderColumnsLikeSheet({ oldGrid, newGrid, ownsColumn: owns })
+    orderColumnsLikeSheet({ oldGrid, newGrid })
 
   it('restores the sheet order when the open tail shuffles', () => {
     // A module update changed which product is "seen first", swapping the two
@@ -204,15 +202,56 @@ describe('orderColumnsLikeSheet', () => {
     ])
   })
 
-  it('bails when a module-owned column changed the fixed block', () => {
-    // An update inserting a fixed column is a genuine shape change - the
-    // documented flatten, never a guessed reorder.
-    const oldGrid = [oldHeader, [v('A1'), v('chair'), v('Chair'), v(15)]]
+  it('keeps the order the owner has dragged our own columns into', () => {
+    // The owner wants price beside name and has moved sku to the far end. A Push
+    // that wrote the canonical order back would undo that every single time.
+    const oldGrid = [
+      [v('name'), v('price'), v('slug'), v('sku')],
+      [v('Chair'), f('=12.5*1.2', 15), v('chair'), v('A1')],
+    ]
+    const newGrid: CellValue[][] = [HEADER, ['A1', 'chair', 'Chair', 15]]
+    const reordered = orderCols(oldGrid, newGrid)
+    expect(reordered).toEqual([
+      ['name', 'price', 'slug', 'sku'],
+      ['Chair', 15, 'chair', 'A1'],
+    ])
+    // And because the header now lines up, the rest of the Push works as usual:
+    // the formula survives instead of every one on the tab being flattened.
+    expect(planFormulaPreservation({ oldGrid, newGrid: reordered, keyStrategies: KEYS })).toEqual([
+      { row: 1, col: 1, formula: '=12.5*1.2' },
+    ])
+  })
+
+  it('appends a fixed column an update has just added, in the owner\'s layout', () => {
+    // cost_price is new to the sheet, so it goes on the end - the columns the
+    // owner has already arranged do not budge to make room for it.
+    const oldGrid = [
+      [v('name'), v('price'), v('slug'), v('sku')],
+      [v('Chair'), v(15), v('chair'), v('A1')],
+    ]
     const newGrid: CellValue[][] = [
       ['sku', 'slug', 'cost_price', 'name', 'price'],
       ['A1', 'chair', 4, 'Chair', 15],
     ]
-    expect(orderColumnsLikeSheet({ oldGrid, newGrid, ownsColumn: (h) => h === 'cost_price' || OWNED.has(h) })).toBe(newGrid)
+    expect(orderCols(oldGrid, newGrid)).toEqual([
+      ['name', 'price', 'slug', 'sku', 'cost_price'],
+      ['Chair', 15, 'chair', 'A1', 4],
+    ])
+  })
+
+  it('keeps a rearranged fixed block and a rearranged tail together', () => {
+    const oldGrid = [
+      [v('slug'), v('Size'), v('name'), v('sku'), v('price'), v('Colour')],
+      [v('chair'), v('L'), v('Chair'), v('A1'), v(15), v('Blue')],
+    ]
+    const newGrid: CellValue[][] = [
+      [...HEADER, 'Colour', 'Size'],
+      ['A1', 'chair', 'Chair', 15, 'Blue', 'L'],
+    ]
+    expect(orderCols(oldGrid, newGrid)).toEqual([
+      ['slug', 'Size', 'name', 'sku', 'price', 'Colour'],
+      ['chair', 'L', 'Chair', 'A1', 15, 'Blue'],
+    ])
   })
 
   it('returns the grid untouched when the headers already line up', () => {

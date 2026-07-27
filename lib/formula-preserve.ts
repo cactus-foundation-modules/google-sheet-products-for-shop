@@ -252,50 +252,44 @@ function rowKey(values: string[], strategies: number[][]): string | null {
   return null
 }
 
-// Reorder the new grid's open-ended COLUMNS to match the order the sheet
-// already has, so a column keeps its position (and the whole tab keeps its
-// formulas) across a Push.
+// Reorder the new grid's COLUMNS to match the order the sheet already has, so a
+// column keeps its position (and the whole tab keeps its formulas) across a
+// Push. The sheet's header is the authority on column order; the export order
+// only decides where a label the sheet has never seen lands.
 //
-// The open-ended tail - attribute columns and other modules' extra fields - is
-// built in "first seen" order, which is only as stable as the order products
-// come out of the database. A module update changed that order once and the
-// attribute blocks swapped places in the header; header compatibility is
-// all-or-nothing, so that single shuffle flattened every formula on the tab.
-// The sheet's existing order wins instead: tail labels the sheet already has
-// keep their column, labels new to the sheet append at the end in export order.
+// Two things need this. The open-ended tail - attribute columns and other
+// modules' extra fields - is built in "first seen" order, which is only as
+// stable as the order products come out of the database; a module update changed
+// that order once and the attribute blocks swapped places in the header. And the
+// owner may simply have dragged our own columns into an order that suits them:
+// price next to cost_price, the columns they never touch shoved off to the
+// right. Rewriting the canonical order over the top would undo that on every
+// Push, and take every formula, row match and deletion plan on the tab with it
+// (header compatibility is all-or-nothing).
 //
-// Only columns the module does NOT own may move. The fixed block's order is the
-// module's to define (validation ranges are addressed by those indices), so a
-// module-owned column outside the common prefix - a fixed column added or
-// removed by an update - means the tab's shape genuinely changed: bail and let
-// the push flatten formulas the documented way rather than guess.
+// So: a label the sheet already carries keeps that column, whoever owns it, and
+// labels new to the sheet - a column an update has just added - append at the
+// end in export order. Nothing is dropped and nothing is renamed; this is a
+// permutation of the pushed grid and nothing more.
 export function orderColumnsLikeSheet(params: {
   oldGrid: SheetCell[][]
   newGrid: CellValue[][]
-  ownsColumn: (header: string) => boolean
 }): CellValue[][] {
-  const { oldGrid, newGrid, ownsColumn } = params
-  if (oldGrid.length < 1 || newGrid.length < 2) return newGrid
+  const { oldGrid, newGrid } = params
+  if (oldGrid.length < 1 || newGrid.length < 1) return newGrid
 
   const oldHeader = (oldGrid[0] ?? []).map((c) => c.value.trim())
   const newHeader = headerNames(newGrid[0] ?? [])
 
-  let prefix = 0
-  while (prefix < newHeader.length && (oldHeader[prefix] ?? '') === newHeader[prefix]) prefix++
-  if (prefix === newHeader.length) return newGrid
-
-  const tail = newHeader.slice(prefix)
-  if (tail.some((h) => ownsColumn(h))) return newGrid
-
-  // Where each old tail label sits in the sheet; first occurrence wins, and a
-  // position already taken by an earlier duplicate is not reused.
+  // Where each label sits in the sheet; first occurrence wins, and a position
+  // already taken by an earlier duplicate is not reused.
   const oldPos = new Map<string, number>()
-  for (let c = prefix; c < oldHeader.length; c++) {
+  for (let c = 0; c < oldHeader.length; c++) {
     const h = oldHeader[c] ?? ''
     if (h !== '' && !oldPos.has(h)) oldPos.set(h, c)
   }
   const used = new Set<number>()
-  const decorated = tail.map((h, i) => {
+  const decorated = newHeader.map((h, i) => {
     const p = oldPos.get(h)
     const pos = p !== undefined && !used.has(p) ? p : Number.MAX_SAFE_INTEGER
     if (p !== undefined) used.add(p)
@@ -303,7 +297,7 @@ export function orderColumnsLikeSheet(params: {
   })
   decorated.sort((a, b) => a.pos - b.pos || a.i - b.i)
 
-  const order = [...Array.from({ length: prefix }, (_, i) => i), ...decorated.map((d) => prefix + d.i)]
+  const order = decorated.map((d) => d.i)
   if (order.every((c, i) => c === i)) return newGrid
   return newGrid.map((row) => order.map((c) => row[c] ?? ''))
 }

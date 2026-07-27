@@ -3,18 +3,14 @@ import { pushProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/p
 import { pushOneVariationTab } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
 import { pushSuppliersTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
 import { ensureVariationTab } from '@/modules/google-sheet-products-for-shop/lib/workbook'
-import { getSheetIds, deleteSheets, readFirstCells } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { RESERVED_TAB_TITLES } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
+import { getSheetIds, deleteSheets, readHeaderRows } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { RESERVED_TAB_TITLES, isVariationTab } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { getConnection, stampLastPush, stampLastPushAttempt, setVariationTabManifest } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import {
   getPushJob, getPushJobStatus, updatePushJob, claimPushStepLease, releasePushStepLease,
 } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import type { PushJob, PushStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
-
-// The marker a variation tab carries in its top-left cell - the same one the
-// merge/split code keys on. Kept in step with variation-tabs.ts.
-const VARIATION_TAB_MARKER = 'Parent Slug'
 
 // How long one /push/step keeps starting new tab writes. Well under the module
 // dispatcher's 60s ceiling so the slowest single tab still finishes and banks its
@@ -45,16 +41,18 @@ export function pushStatus(job: PushJob): PushStatus {
 
 // Delete the variation tabs that belong to no current product: a product that
 // stopped being variable (its tab is not in `keep`), or a tab the owner renamed
-// away from a product (same). A tab is only ever deleted when it still carries the
-// variation marker in A1 - the owner's own tabs never do, so they are safe. One
-// getSheetIds and one batched A1 read classify every suspect without a read per tab.
+// away from a product (same). A tab is only ever deleted when its header still
+// carries the "Parent Slug" marker - the owner's own tabs never do, so they are
+// safe. Classified by the same rule a Pull uses, so a tab whose columns the owner
+// has rearranged is not read by one and ignored by the other. One getSheetIds and
+// one batched header read classify every suspect without a read per tab.
 async function deleteOrphanVariationTabs(spreadsheetId: string, keep: Set<string>): Promise<void> {
   const ids = await getSheetIds(spreadsheetId)
   const suspects = Object.keys(ids).filter((t) => !RESERVED_TAB_TITLES.has(t) && !keep.has(t))
   if (suspects.length === 0) return
-  const firstCells = await readFirstCells(spreadsheetId, suspects)
+  const headers = await readHeaderRows(spreadsheetId, suspects)
   const doomed = suspects
-    .filter((t) => (firstCells[t] ?? '').trim() === VARIATION_TAB_MARKER)
+    .filter((t) => isVariationTab(t, headers[t] ?? []))
     .map((t) => ids[t])
     .filter((id): id is number => id !== undefined)
   await deleteSheets(spreadsheetId, doomed)

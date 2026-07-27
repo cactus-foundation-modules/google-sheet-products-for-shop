@@ -64,6 +64,11 @@ describe('isVariationTab', () => {
     expect(isVariationTab('Products', ['Parent Slug'])).toBe(false)
     expect(isVariationTab('Read me', ['Parent Slug'])).toBe(false)
   })
+  it('accepts a tab whose columns the owner has rearranged', () => {
+    // Parent Slug dragged out of column A. Still our tab - a Pull that missed it
+    // would read the whole product as "gone from the sheet".
+    expect(isVariationTab('Oak Desk', ['Variant SKU', 'Price', 'Parent Slug', 'Parent Name'])).toBe(true)
+  })
   it('rejects a tab without the marker', () => {
     expect(isVariationTab('Owner notes', ['My column'])).toBe(false)
   })
