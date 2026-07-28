@@ -1,4 +1,7 @@
 import { getAccessToken, GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
+import {
+  awaitSlot, sleep, shouldBackOff, backoffMs, MAX_BACKOFF_RETRIES,
+} from '@/modules/google-sheet-products-for-shop/lib/rate-limit'
 
 // Thin fetch wrapper over the five Sheets/Drive REST calls this module needs.
 // Deliberately no `googleapis` dependency: that package is enormous with a large
@@ -16,18 +19,34 @@ function tabRange(tab: string, a1?: string): string {
 // One access-token-bearing request, with a single refresh-and-retry on a 401
 // (never a loop). getAccessToken(true) forces a refresh and persists the new
 // token, so the retry reads a fresh one.
+//
+// Every call also waits for a slot in the matching rate bucket first, and backs off
+// and retries when Google says 429 anyway. Both live here rather than at the call
+// sites so no future Sheets call can forget them.
 async function googleFetch(url: string, init: RequestInit, allowRetry = true): Promise<Response> {
-  const token = await getAccessToken()
-  const res = await fetch(url, {
-    ...init,
-    headers: { ...init.headers, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(30_000),
-  })
-  if (res.status === 401 && allowRetry) {
-    await getAccessToken(true)
-    return googleFetch(url, init, false)
+  const isRead = (init.method ?? 'GET').toUpperCase() === 'GET'
+  for (let attempt = 0; ; attempt++) {
+    await awaitSlot(isRead)
+    const token = await getAccessToken()
+    const res = await fetch(url, {
+      ...init,
+      headers: { ...init.headers, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(30_000),
+    })
+    if (res.status === 401 && allowRetry) {
+      await getAccessToken(true)
+      return googleFetch(url, init, false)
+    }
+    if (attempt < MAX_BACKOFF_RETRIES && shouldBackOff(res.status, isRead)) {
+      const wait = backoffMs(res, attempt)
+      // Drain the body before dropping the response, so the connection is released
+      // back to the pool rather than left hanging until it is collected.
+      await res.text().catch(() => '')
+      await sleep(wait)
+      continue
+    }
+    return res
   }
-  return res
 }
 
 // A Sheets/Drive call that came back with a status we cannot use. Carries the
@@ -76,6 +95,13 @@ async function ok(res: Response, what: string): Promise<Response> {
 //   - Google being slow enough to hit the 30s per-call timeout above
 export function sheetFailureReason(err: unknown): string {
   if (err instanceof SheetsApiError) {
+    // Google caps how many times a minute one account may read from or write to a
+    // sheet. Big catalogues reach it, and its own wording ("Quota exceeded for
+    // quota metric 'Read requests'... consumer 'project_number:...'") means nothing
+    // to a site owner. It clears on its own, so say so and say when.
+    if (err.status === 429) {
+      return 'Google is limiting how fast it will let us read and write this sheet, which happens on a big catalogue. Nothing is broken and nothing has been lost. Wait a minute, then carry on from where it stopped.'
+    }
     if (/unable to parse range/i.test(err.googleMessage)) {
       return `Google could not find that tab in your spreadsheet (${err.googleMessage}). A tab has been renamed or deleted - restore the "Products" and "Variations" tab names, or create the sheet again from the settings page.`
     }
@@ -242,17 +268,19 @@ export async function writeFormulaRuns(spreadsheetId: string, tab: string, runs:
     })),
   })
   // Unlike every other write in this module, the restore is preceded by a write
-  // that has ALREADY flattened these cells to plain values. A transient 429/5xx
+  // that has ALREADY flattened these cells to plain values. A transient failure
   // here therefore erases every surviving formula for good, with nothing to try
-  // again from - so this one call gets a small bounded backoff before it gives
-  // up, where the others fail fast. Auth (401) is still handled inside googleFetch.
+  // again from. 429 is now retried for every call inside googleFetch; what is left
+  // to handle here is 5xx, which googleFetch deliberately does not retry on a write
+  // (it may have been applied). Re-sending this particular one is safe: it writes
+  // fixed formula text to fixed cells, so applying it twice is applying it once.
   let lastRes: Response | null = null
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchUpdate`, { method: 'POST', body })
     if (res.ok) return
-    if (res.status === 429 || res.status >= 500) {
+    if (res.status >= 500) {
       lastRes = res
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * 2 ** attempt))
+      if (attempt < 2) await sleep(400 * 2 ** attempt)
       continue
     }
     await ok(res, 'write formulas') // non-retryable - throws

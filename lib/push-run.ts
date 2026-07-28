@@ -17,6 +17,14 @@ import type { PushJob, PushStatus } from '@/modules/google-sheet-products-for-sh
 // cursor before the platform kills the request. Same value the Pull uses.
 const STEP_TIME_BUDGET_MS = 35_000
 
+// How many variation tabs one step may write, whatever the clock says. Each tab
+// costs Google a handful of reads and writes (see pushGrid), and Google allows 60
+// of each a minute per account. Small tabs are fast enough that 35 seconds alone
+// would let one step burn through a whole minute's allowance and leave the next
+// step throttled, so the step also stops on count. The browser starts the next one
+// immediately, so this costs a round trip rather than any progress.
+const STEP_MAX_TABS = 15
+
 // How long a claimed step lease lasts before another worker may take over. Longer
 // than any single request can live, so a lease only ever expires on a dead step.
 const STEP_LEASE_MS = 90_000
@@ -103,7 +111,8 @@ async function runPushStep(job: PushJob): Promise<void> {
       let varRows = job.variationsRows
       let formulas = job.formulasKept
       const startedAt = Date.now()
-      while (cursor < tabs.length && Date.now() - startedAt < STEP_TIME_BUDGET_MS) {
+      const stopAtTab = cursor + STEP_MAX_TABS
+      while (cursor < tabs.length && cursor < stopAtTab && Date.now() - startedAt < STEP_TIME_BUDGET_MS) {
         if ((await getPushJobStatus(jobId)) === 'CANCELLED') return
         const t = tabs[cursor]!
         if (existing[t.title] === undefined) {
