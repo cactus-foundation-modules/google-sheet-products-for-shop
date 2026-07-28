@@ -102,6 +102,13 @@ export type PullJob = {
   varDeleted: number
   prodErrors: SyncRowError[] | null
   varErrors: SyncRowError[] | null
+  // Live commentary from the importers: the row being written right now, how
+  // many rows of the chunk in flight are behind it, and the last few that went
+  // through (newest first). Display only - the resume cursor is still
+  // productsDone / variationsDone, which only ever move at a chunk boundary.
+  currentItem: string | null
+  currentOffset: number
+  recentItems: string[] | null
   error: string | null
   runBy: string | null
   createdAt: Date
@@ -169,6 +176,10 @@ export type PullStatus = {
   productsDone: number
   variationsTotal: number
   variationsDone: number
+  // The row being written as this snapshot was taken, and the last few finished
+  // (newest first) - what the dialog names while the bars move.
+  currentItem: string | null
+  recentItems: string[]
   detected: PullDetected | null
   counts: {
     productsCreated: number

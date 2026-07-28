@@ -17,6 +17,9 @@ function asErrors(v: unknown): SyncRowError[] | null {
 function asNumbers(v: unknown): number[] | null {
   return Array.isArray(v) ? (v as number[]) : null
 }
+function asStrings(v: unknown): string[] | null {
+  return Array.isArray(v) ? (v as string[]).filter((s) => typeof s === 'string') : null
+}
 
 function mapJob(r: Record<string, unknown>): PullJob {
   return {
@@ -44,6 +47,9 @@ function mapJob(r: Record<string, unknown>): PullJob {
     varDeleted: r.var_deleted as number,
     prodErrors: asErrors(r.prod_errors),
     varErrors: asErrors(r.var_errors),
+    currentItem: (r.current_item as string | null) ?? null,
+    currentOffset: (r.current_offset as number | undefined) ?? 0,
+    recentItems: asStrings(r.recent_items),
     error: (r.error as string | null) ?? null,
     runBy: (r.run_by as string | null) ?? null,
     createdAt: r.created_at as Date,
@@ -138,6 +144,9 @@ export type PullJobUpdate = {
   varDeleted?: number
   prodErrors?: SyncRowError[]
   varErrors?: SyncRowError[]
+  currentItem?: string | null
+  currentOffset?: number
+  recentItems?: string[]
   error?: string | null
   // Set true to clear the stored grids once the job is finished, so a completed
   // row does not carry the whole catalogue snapshot around.
@@ -159,6 +168,9 @@ export async function updatePullJob(id: string, fields: PullJobUpdate): Promise<
   if (fields.varDeleted !== undefined) sets.push(Prisma.sql`"var_deleted" = ${fields.varDeleted}`)
   if (fields.prodErrors !== undefined) sets.push(Prisma.sql`"prod_errors" = ${fields.prodErrors.length ? JSON.stringify(fields.prodErrors) : null}::jsonb`)
   if (fields.varErrors !== undefined) sets.push(Prisma.sql`"var_errors" = ${fields.varErrors.length ? JSON.stringify(fields.varErrors) : null}::jsonb`)
+  if (fields.currentItem !== undefined) sets.push(Prisma.sql`"current_item" = ${fields.currentItem}`)
+  if (fields.currentOffset !== undefined) sets.push(Prisma.sql`"current_offset" = ${fields.currentOffset}`)
+  if (fields.recentItems !== undefined) sets.push(Prisma.sql`"recent_items" = ${fields.recentItems.length ? JSON.stringify(fields.recentItems) : null}::jsonb`)
   if (fields.error !== undefined) sets.push(Prisma.sql`"error" = ${fields.error}`)
   if (fields.clearGrids) sets.push(Prisma.sql`"products_grid" = NULL`, Prisma.sql`"variations_grid" = NULL`, Prisma.sql`"deletion_plan" = NULL`)
   // Never write to a cancelled job. A Stop lands while a step is mid-flight, and

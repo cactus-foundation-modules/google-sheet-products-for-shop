@@ -285,7 +285,32 @@ function PhaseTracker({ phase }: { phase: PullStatus['phase'] }) {
   )
 }
 
-function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullStatus | null; onClose: () => void; onResumableChange: (s: PullStatus | null) => void }) {
+// The last few rows that went through, newest first. A fixed height so the
+// dialog does not jump about as names come and go, and each line clipped rather
+// than wrapped - a long product name must not reflow the box every 200ms.
+function RecentItems({ items }: { items: string[] }) {
+  return (
+    <div style={{ marginTop: '0.5rem', marginBottom: '0.25rem' }}>
+      <div style={{ ...muted, fontSize: '0.75rem', marginBottom: '0.25rem' }}>Just done</div>
+      <ul style={{ listStyle: 'none', margin: 0, padding: 0, maxHeight: '7.5rem', overflowY: 'auto' }}>
+        {items.map((item, i) => (
+          <li
+            key={`${item}-${i}`}
+            style={{
+              fontSize: '0.75rem', color: 'var(--color-text-muted)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              lineHeight: 1.6,
+            }}
+          >
+            ✓ {item}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function PullModal({ resumable, onClose, onResumableChange }:{ resumable: PullStatus | null; onClose: () => void; onResumableChange: (s: PullStatus | null) => void }) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -452,6 +477,7 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
       pullJobId: body.pullJobId, status: 'RUNNING', phase: 'PRODUCTS', done: false,
       productsTotal: body.productsTotal ?? 0, productsDone: 0,
       variationsTotal: body.variationsTotal ?? 0, variationsDone: 0,
+      currentItem: null, recentItems: [],
       detected: body.detected ?? null,
       counts: { productsCreated: 0, productsUpdated: 0, productsDeleted: 0, variationsCreated: 0, variationsUpdated: 0, variationsDeleted: 0 },
       errorCount: 0, error: null,
@@ -519,6 +545,13 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
           <p style={{ color: 'var(--color-danger)', fontWeight: 600, marginBottom: '0.75rem' }}>
             The pull stopped: {status.error ?? 'unknown error'}. Nothing is lost - press Continue to pick up where it left off.
           </p>
+        ) : status.currentItem ? (
+          // The row the importer is on right now. Named rather than counted,
+          // because "175 of 400" tells an owner nothing about which of their
+          // products is being written.
+          <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>
+            Updating <span style={{ fontWeight: 400 }}>{status.currentItem}</span>…
+          </p>
         ) : (
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>{PHASE_LABEL[status.phase]}</p>
         )}
@@ -527,6 +560,10 @@ function PullModal({ resumable, onClose, onResumableChange }: { resumable: PullS
 
         <ProgressRow label="Products" done={status.productsDone} total={status.productsTotal} />
         <ProgressRow label="Variations" done={status.variationsDone} total={status.variationsTotal} />
+
+        {!status.done && status.recentItems.length > 0 && (
+          <RecentItems items={status.recentItems} />
+        )}
 
         {(status.detected?.productsUnchanged || status.detected?.variationsUnchanged) ? (
           <p style={{ ...muted, fontSize: '0.75rem', marginTop: '-0.35rem', marginBottom: '0.6rem' }}>

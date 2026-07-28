@@ -37,11 +37,64 @@ const PROD_ROW_CHUNK = 25
 // its cursor write in before the platform kills the request.
 const STEP_TIME_BUDGET_MS = 35_000
 
+// How many finished rows the dialog keeps on screen, newest first.
+const RECENT_ITEMS = 8
+
+// Smallest gap between two progress writes. Both importers announce every row,
+// and a 600-row Pull writing the job row 600 times would spend more time on
+// commentary than on work. The browser polls at 1.5s, so anything under that is
+// invisible anyway; this just keeps the name moving between polls.
+const ROW_REPORT_MS = 600
+
+// Turns the importers' per-row callbacks into the job row's live commentary:
+// the item being written, how many rows of the chunk in flight are behind it,
+// and the last few finished. None of it is a cursor - see migration 008 for why
+// the real cursor may not move mid-chunk - so a dropped write costs nothing but
+// a stale line on screen, which is why every write here is best-effort.
+function makeRowReporter(jobId: string, initialRecent: string[]) {
+  let recent = initialRecent.slice(0, RECENT_ITEMS)
+  let current: string | null = null
+  let offset = 0
+  let lastWriteAt = 0
+
+  async function write(): Promise<void> {
+    lastWriteAt = Date.now()
+    await updatePullJob(jobId, { currentItem: current, currentOffset: offset, recentItems: recent }).catch(() => {})
+  }
+
+  return {
+    // Called by the importer as it picks a row up, before that row's writes. The
+    // row announced last is the one now finished, so it moves to the recents.
+    async onRow(label: string): Promise<void> {
+      if (current !== null) {
+        recent = [current, ...recent].slice(0, RECENT_ITEMS)
+        offset += 1
+      }
+      current = label.trim() || 'Untitled row'
+      if (Date.now() - lastWriteAt >= ROW_REPORT_MS) await write()
+    },
+    // Chunk boundary: the last announced row has finished too, and the offset
+    // resets because the real cursor is about to absorb it. Returns the fields
+    // for the same UPDATE that banks the cursor rather than writing its own.
+    bank(): { currentItem: null; currentOffset: number; recentItems: string[] } {
+      if (current !== null) { recent = [current, ...recent].slice(0, RECENT_ITEMS); current = null }
+      offset = 0
+      return { currentItem: null, currentOffset: 0, recentItems: recent }
+    },
+  }
+}
+
 // Live products progress is the job's own cursor, written after every chunk -
 // no extra read of the shop import job per status poll. Once the products phase
-// is behind us, products are simply all done.
+// is behind us, products are simply all done. The in-chunk offset rides on top
+// so the bar moves per row rather than in jumps of 25; it is display only and
+// never outruns the total.
 function productsDoneFor(job: PullJob): number {
-  return job.phase === 'PRODUCTS' ? job.productsDone : job.productsTotal
+  return job.phase === 'PRODUCTS' ? Math.min(job.productsDone + job.currentOffset, job.productsTotal) : job.productsTotal
+}
+
+function variationsDoneFor(job: PullJob): number {
+  return job.phase === 'VARIATIONS' ? Math.min(job.variationsDone + job.currentOffset, job.variationsTotal) : job.variationsDone
 }
 
 export async function pullStatus(job: PullJob): Promise<PullStatus> {
@@ -54,7 +107,11 @@ export async function pullStatus(job: PullJob): Promise<PullStatus> {
     productsTotal: job.productsTotal,
     productsDone,
     variationsTotal: job.variationsTotal,
-    variationsDone: job.variationsDone,
+    variationsDone: variationsDoneFor(job),
+    // A stopped, failed or finished job has nothing in flight - the last name it
+    // wrote would otherwise sit there reading as if work were still going on.
+    currentItem: job.status === 'RUNNING' ? job.currentItem : null,
+    recentItems: job.recentItems ?? [],
     detected: job.detected,
     counts: {
       productsCreated: job.prodCreated,
@@ -213,6 +270,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       // sees in their sheet, so a row error points at the right place. Falls back
       // to the filtered position on jobs created before the row map existed.
       const prodSheetRow = (filteredIndex: number) => job.productsRowMap?.[filteredIndex] ?? (filteredIndex + 2)
+      const reporter = makeRowReporter(jobId, job.recentItems ?? [])
       while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
         // Stop pressed since the step began? Leave the cursor where it is and
         // get out - rows already imported stay, the rest are never fed in.
@@ -221,7 +279,13 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         const subGrid = [header, ...chunk]
         // The engine matches by SKU/slug and diffs before writing, so feeding it
         // header + a slice is idempotent: a re-run chunk is all no-ops.
-        await processImportJob(job.shopImportJobId, gridToImportCsv(subGrid), adminEmail, null, { notify: false })
+        // onRow names the product being written as it is written - the engine
+        // announces each row before touching it, so the dialog can say "Updating
+        // Chiro Plus…" rather than only counting chunks of 25.
+        await processImportJob(job.shopImportJobId, gridToImportCsv(subGrid), adminEmail, null, {
+          notify: false,
+          onRow: (p) => reporter.onRow(p.name),
+        })
         const sj = await getImportJobById(job.shopImportJobId)
         // The engine numbers rows within the chunk it was handed (data row i is
         // reported as i + 2); map that to the owner's sheet row.
@@ -248,10 +312,14 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
           status: 'RUNNING', error: null,
           productsDone: cursor,
           prodCreated: created, prodUpdated: updated, prodSkipped: skipped, prodErrors: errors,
+          ...reporter.bank(),
         })
       }
       if (cursor >= dataRows.length) {
-        await updatePullJob(jobId, { phase: 'DELETIONS', status: 'RUNNING', error: null })
+        // Leaving the phase clears the in-flight name: the deletions pass is bulk
+        // statements with no row to announce, and a stale product name sitting
+        // under "Removing items…" would read as if it were still being written.
+        await updatePullJob(jobId, { phase: 'DELETIONS', status: 'RUNNING', error: null, currentItem: null, currentOffset: 0 })
       }
     } else if (job.phase === 'DELETIONS') {
       if (!job.productsGrid || !job.variationsGrid) throw new Error('Pull job is missing its sheet snapshot.')
@@ -268,6 +336,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       const variationDeletions = await applyVariationDeletions(plan.variations)
       await updatePullJob(jobId, {
         phase: 'VARIATIONS', status: 'RUNNING', error: null,
+        currentItem: null, currentOffset: 0,
         prodDeleted: productDeletions.deleted,
         varDeleted: variationDeletions.deleted,
         prodErrors: [...(job.prodErrors ?? []), ...productDeletions.errors],
@@ -285,6 +354,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       // that. Ordering is deterministic, so variationsDone still resumes cleanly.
       const { orderedRows, orderedSheetRows, groupStarts } = groupVariationRowsByParent(header, job.variationsGrid.slice(1), job.variationsRowMap)
       const stepStartedAt = Date.now()
+      const reporter = makeRowReporter(jobId, job.recentItems ?? [])
       let cursor = job.variationsDone
       let created = job.varCreated
       let updated = job.varUpdated
@@ -304,7 +374,12 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         }
         if (end <= cursor) end = orderedRows.length
         const chunk = orderedRows.slice(cursor, end)
-        const res = await importVariationsCsv(gridToImportCsv([header, ...chunk]))
+        // Same commentary as products: the importer announces each variation as
+        // it picks it up, named parent-first so a row reads the way the owner's
+        // sheet does ("Chiro Plus - Black / High back").
+        const res = await importVariationsCsv(gridToImportCsv([header, ...chunk]), {
+          onRow: (p) => reporter.onRow(p.label ? `${p.parent} - ${p.label}` : p.parent),
+        })
         // Importer numbers a data row as its 1-based CSV row (header = 1, first
         // data = 2); map back to the owner's sheet row via the ordered map.
         const chunkErrors = res.errors.map((e) => ({
@@ -321,6 +396,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
           varCreated: created,
           varUpdated: updated,
           varErrors: errors,
+          ...reporter.bank(),
           ...(cursor >= orderedRows.length ? { phase: 'DONE' } : {}),
         })
       }
@@ -335,7 +411,13 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
   } catch (err) {
     // A failed step leaves the cursor intact and the job FAILED, so Continue can
     // retry this same batch once the cause (a bad row, a transient DB blip) clears.
-    await updatePullJob(jobId, { status: 'FAILED', error: err instanceof Error ? err.message : 'Unknown error' })
+    // The in-chunk offset goes with it: the retry re-runs that chunk from the
+    // banked cursor, so leaving the offset up would show a count that is ahead of
+    // what actually landed for as long as the job sits paused.
+    await updatePullJob(jobId, {
+      status: 'FAILED', error: err instanceof Error ? err.message : 'Unknown error',
+      currentItem: null, currentOffset: 0,
+    })
   }
 }
 
