@@ -13,6 +13,7 @@ import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop
 import { diffProductRows, diffVariationRows, filterGridByDiff } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { createPullJob, getLatestUnfinishedPullJob, PullAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 import type { PullDetected } from '@/modules/google-sheet-products-for-shop/lib/types'
 
@@ -44,6 +45,14 @@ export async function POST() {
       { error: 'A pull is already in progress. Continue or cancel it first.', pullJobId: existing.id },
       { status: 409 },
     )
+  }
+
+  // Refuse while a Push is part-way through - same guard as the preview, for the
+  // same two reasons: a running push is spending the read quota this route needs
+  // to read the sheet, and it is rewriting the tabs mid-read. Push has the mirror
+  // guard against a running Pull.
+  if (await getLatestUnfinishedPushJob()) {
+    return errorResponse('A push to the sheet is part-way through. Open Push and let it finish (or cancel it), then pull.', 409)
   }
 
   // Read the Products tab and merge every per-product variation tab up front, so an

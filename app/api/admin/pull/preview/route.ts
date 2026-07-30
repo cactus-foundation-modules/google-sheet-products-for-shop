@@ -3,6 +3,7 @@ import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
+import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
@@ -49,6 +50,17 @@ export async function POST() {
 
   const conn = await getConnection()
   if (!conn?.spreadsheetId) return errorResponse('Create the Google Sheet first.', 400)
+
+  // Refuse while a Push is part-way through, before touching Google at all. A
+  // running push is spending the same sixty-reads-a-minute quota this preview
+  // needs, so the preview's reads queue behind it, blow the route's sixty-second
+  // ceiling, and the owner sees "could not read the sheet" about a sheet that is
+  // fine. It is also rewriting the very tabs the preview would read - a torn
+  // snapshot even when it does squeak in. Mirrors the guard Push has against a
+  // running Pull.
+  if (await getLatestUnfinishedPushJob()) {
+    return errorResponse('A push to the sheet is part-way through. Open Push and let it finish (or cancel it), then pull.', 409)
+  }
 
   // Two failures with nothing in common: Google would not give us the grids, or
   // the catalogue comparison behind them fell over. They were once caught

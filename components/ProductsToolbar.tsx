@@ -510,6 +510,19 @@ function PullModal({ resumable, onClose, onResumableChange }:{ resumable: PullSt
     onClose()
   }
 
+  // Closing the dialog (the ✕, or a click on the backdrop) while a job is
+  // unfinished STOPS that job, after the same confirm as Stop pull. It used to
+  // just unmount the dialog and leave the job to be resumed later - which read
+  // as "it carried on after I closed it". Closing the whole browser tab still
+  // pauses rather than stops (nothing client-side runs to cancel it), which is
+  // what the resumable design is for.
+  function requestClose() {
+    const unfinished = status && !status.done && status.status !== 'CANCELLED'
+    if (!unfinished) { onClose(); return }
+    if (!confirm('Stop this pull?\n\nEverything already updated stays as it is - the rest of your sheet just will not be applied. You can pull again whenever you like.')) return
+    void (async () => { await abandonPull(); onClose() })()
+  }
+
   // Stop a pull that is running right now. The dialog stays open on the tally so
   // the owner can see what did land before they close it - a stop mid-catalogue
   // leaves the shop half-updated, which is worth showing rather than hiding.
@@ -530,7 +543,7 @@ function PullModal({ resumable, onClose, onResumableChange }:{ resumable: PullSt
     const failed = status.status === 'FAILED'
     const cancelled = status.status === 'CANCELLED'
     return (
-      <Modal title={title} onClose={onClose}>
+      <Modal title={title} onClose={requestClose}>
         {status.done ? (
           <p style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Pull complete.</p>
         ) : cancelled && pulling ? (
@@ -595,7 +608,7 @@ function PullModal({ resumable, onClose, onResumableChange }:{ resumable: PullSt
               <span style={muted}>
                 {failed
                   ? 'Retrying… stop it if you would rather not wait.'
-                  : 'Working… you can leave this open. Closing the tab pauses it - reopen and Continue.'}
+                  : 'Working… leave this open until it finishes. Closing this window stops the pull.'}
               </span>
             </>
           ) : (
@@ -624,7 +637,7 @@ function PullModal({ resumable, onClose, onResumableChange }:{ resumable: PullSt
   const errorCount = (p?.rowErrors.length ?? 0) + (preview?.variations.rowErrors.length ?? 0)
   const nothingToDo = !!p && totalRows > 0 && changedTotal === 0 && deleteCount === 0 && errorCount === 0
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={requestClose}>
       {loadErr ? (
         <p style={{ color: 'var(--color-danger)' }}>{loadErr}</p>
       ) : !preview || !p ? (
@@ -906,6 +919,18 @@ function PushModal({ resumable, onClose, onResumableChange }: { resumable: PushS
     await abandonPush()
     onClose()
   }
+
+  // Same close-means-stop as the Pull dialog: closing this window while the push
+  // is unfinished stops the job (after the Stop push confirm) rather than leaving
+  // it to be resumed - a half-done push keeps spending Google's read quota
+  // budget on every Continue, and an owner who closed the window meant "stop".
+  // Closing the whole browser tab still pauses; nothing client-side runs then.
+  function requestClose() {
+    const unfinished = status && !status.done && status.status !== 'CANCELLED'
+    if (!unfinished) { onClose(); return }
+    if (!confirm('Stop this push?\n\nTabs already written stay as they are - the rest of the sheet just will not be updated. You can push again whenever you like.')) return
+    void (async () => { await abandonPush(); onClose() })()
+  }
   async function stopPush() {
     if (!confirm('Stop this push?\n\nTabs already written stay as they are - the rest of the sheet just will not be updated. You can push again whenever you like.')) return
     setStopping(true)
@@ -920,7 +945,7 @@ function PushModal({ resumable, onClose, onResumableChange }: { resumable: PushS
   const cancelled = status?.status === 'CANCELLED'
 
   return (
-    <Modal title={title} onClose={onClose}>
+    <Modal title={title} onClose={requestClose}>
       {!status ? (
         <p style={muted}>{starting ? 'Starting the push…' : 'Preparing…'}</p>
       ) : (
@@ -968,7 +993,7 @@ function PushModal({ resumable, onClose, onResumableChange }: { resumable: PushS
                   {stopping ? 'Stopping…' : 'Stop push'}
                 </button>
                 <span style={muted}>
-                  {failed ? 'Retrying… stop it if you would rather not wait.' : 'Working… you can leave this open. Closing the tab pauses it - reopen and Continue.'}
+                  {failed ? 'Retrying… stop it if you would rather not wait.' : 'Working… leave this open until it finishes. Closing this window stops the push.'}
                 </span>
               </>
             ) : (
