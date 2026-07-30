@@ -2,6 +2,7 @@ import { getAccessToken, GoogleAuthError } from '@/modules/google-sheet-products
 import {
   awaitSlot, sleep, shouldBackOff, backoffMs, MAX_BACKOFF_RETRIES,
 } from '@/modules/google-sheet-products-for-shop/lib/rate-limit'
+import { tabRange, batchGetGroups } from '@/modules/google-sheet-products-for-shop/lib/batch-ranges'
 
 // Thin fetch wrapper over the five Sheets/Drive REST calls this module needs.
 // Deliberately no `googleapis` dependency: that package is enormous with a large
@@ -9,12 +10,6 @@ import {
 // justify either.
 
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets'
-
-// A1 range for a whole tab, or a tab anchored at a cell. Tab titles are quoted
-// so a title with a space ("Read me") is still a valid range.
-function tabRange(tab: string, a1?: string): string {
-  return encodeURIComponent(a1 ? `'${tab}'!${a1}` : `'${tab}'`)
-}
 
 // One access-token-bearing request, with a single refresh-and-retry on a 401
 // (never a loop). getAccessToken(true) forces a refresh and persists the new
@@ -377,26 +372,55 @@ export async function deleteSheets(spreadsheetId: string, sheetIds: number[]): P
   await batchUpdate(spreadsheetId, sheetIds.map((sheetId) => ({ deleteSheet: { sheetId } })))
 }
 
-// values.batchGet of the HEADER ROW of each named tab, in ONE call, as a map of
-// tab title -> that row's cells. Lets a Push classify the tabs it did not just
-// write - a variation tab carries a "Parent Slug" column, an owner's own tab
-// does not - without a read per tab. The whole row rather than A1 alone, because
-// the owner may have dragged that column somewhere else.
+// values.batchGet of the HEADER ROW of each named tab, as a map of tab title ->
+// that row's cells. Lets a caller classify tabs - a variation tab carries a
+// "Parent Slug" column, an owner's own tab does not - without a read per tab.
+// The whole row rather than A1 alone, because the owner may have dragged that
+// column somewhere else. Grouped by batchGetGroups so a several-hundred-tab
+// workbook cannot push the request URL past what Google accepts; each group is
+// one call against the read quota.
 export async function readHeaderRows(spreadsheetId: string, tabs: string[]): Promise<Record<string, string[]>> {
   const out: Record<string, string[]> = {}
-  if (tabs.length === 0) return out
-  const ranges = tabs.map((t) => `ranges=${tabRange(t, '1:1')}`).join('&')
-  const res = await ok(
-    await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`, { method: 'GET' }),
-    'read first cells'
-  )
-  const data = (await res.json()) as { valueRanges?: Array<{ values?: unknown[][] }> }
-  // valueRanges come back in the order the ranges were requested.
-  ;(data.valueRanges ?? []).forEach((vr, i) => {
-    const title = tabs[i]
-    if (title === undefined) return
-    out[title] = (vr.values?.[0] ?? []).map((cell) => (cell == null ? '' : String(cell)))
-  })
+  for (const group of batchGetGroups(tabs, '1:1')) {
+    const ranges = group.map((t) => `ranges=${tabRange(t, '1:1')}`).join('&')
+    const res = await ok(
+      await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`, { method: 'GET' }),
+      'read first cells'
+    )
+    const data = (await res.json()) as { valueRanges?: Array<{ values?: unknown[][] }> }
+    // valueRanges come back in the order the ranges were requested.
+    ;(data.valueRanges ?? []).forEach((vr, i) => {
+      const title = group[i]
+      if (title === undefined) return
+      out[title] = (vr.values?.[0] ?? []).map((cell) => (cell == null ? '' : String(cell)))
+    })
+  }
+  return out
+}
+
+// values.batchGet of WHOLE tabs, as a map of tab title -> grid, stringified
+// exactly as readGrid stringifies a single tab. This is what lets a Pull read a
+// big workbook at all: one values.get per product tab meant one quota token per
+// tab against Google's sixty reads a minute, so a workbook past ~a hundred tabs
+// spent longer queuing for Google than the sixty seconds a module route gets to
+// answer, and the owner saw only a timeout. Grouped the same way as
+// readHeaderRows: each group is ONE read against the quota, however many tabs it
+// carries.
+export async function readGridsBatch(spreadsheetId: string, tabs: string[]): Promise<Record<string, string[][]>> {
+  const out: Record<string, string[][]> = {}
+  for (const group of batchGetGroups(tabs)) {
+    const ranges = group.map((t) => `ranges=${tabRange(t)}`).join('&')
+    const res = await ok(
+      await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchGet?${ranges}&valueRenderOption=UNFORMATTED_VALUE`, { method: 'GET' }),
+      'read grids'
+    )
+    const data = (await res.json()) as { valueRanges?: Array<{ values?: unknown[][] }> }
+    ;(data.valueRanges ?? []).forEach((vr, i) => {
+      const title = group[i]
+      if (title === undefined) return
+      out[title] = (vr.values ?? []).map((row) => row.map((cell) => (cell == null ? '' : String(cell))))
+    })
+  }
   return out
 }
 
