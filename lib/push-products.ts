@@ -6,6 +6,7 @@ import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/she
 import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { DESCRIPTION_PUCK_COLUMN, descriptionPuckCell } from '@/modules/google-sheet-products-for-shop/lib/description-puck'
+import { VARIATIONS_COLUMN, getVariationCounts } from '@/modules/google-sheet-products-for-shop/lib/variation-count'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 
 // The full Products header. Cost price is always included - the owner asked for
@@ -13,6 +14,13 @@ import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-fo
 // figure like RRP and trade, and anyone the sheet is shared with can see it.
 export function productColumns(): CsvColumn[] {
   return [...CSV_COLUMNS]
+}
+
+// A header as the Pull normalises it (lowercased, spaces to underscores), so a
+// provider field labelled "Variations" is recognised as a clash with our own
+// column rather than sailing past a case-sensitive compare.
+function normaliseHeader(label: string): string {
+  return label.trim().toLowerCase().replace(/\s+/g, '_')
 }
 
 // Cells go into the sheet as the type they actually are. Writing a price as the
@@ -73,6 +81,14 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
             console.warn(`[google-sheet-products-for-shop] duplicate product-field label "${c.label}" - keeping the first; give the fields distinct labels to sync both.`)
             continue
           }
+          // Same reasoning against this module's own columns: a field labelled
+          // "Variations" would land a second column under the same header (Pull
+          // reads a column by its header text), so ours wins and the field is
+          // skipped with a warning rather than emitting an ambiguous pair.
+          if (normaliseHeader(c.label) === VARIATIONS_COLUMN) {
+            console.warn(`[google-sheet-products-for-shop] product-field label "${c.label}" clashes with the built-in ${VARIATIONS_COLUMN} column - rename the field to sync it.`)
+            continue
+          }
           cols.push({ key: c.key, label: c.label })
           if (!fieldHeaderOrder.includes(c.label)) fieldHeaderOrder.push(c.label)
         }
@@ -87,15 +103,24 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
     }
   }
 
-  // The designed description sits between the fixed columns and the open-ended
-  // provider tail: a column this module owns outright, so it keeps a fixed
-  // position rather than being shuffled about with the attribute columns.
-  const header: CellValue[] = [...columns.map((c) => c as CellValue), DESCRIPTION_PUCK_COLUMN, ...fieldHeaderOrder]
+  // How many variations each product has - one grouped query for the whole
+  // catalogue, not one per row.
+  const variationCounts = await getVariationCounts(productIds)
+
+  // The designed description and the variation count sit between the fixed
+  // columns and the open-ended provider tail: columns this module owns outright,
+  // so they keep a fixed position rather than being shuffled about with the
+  // attribute columns.
+  const header: CellValue[] = [...columns.map((c) => c as CellValue), DESCRIPTION_PUCK_COLUMN, VARIATIONS_COLUMN, ...fieldHeaderOrder]
   const grid: CellValue[][] = [header]
   for (const row of rows) {
     const base = columns.map((c) => typedCell(c, row[c] ?? ''))
     const designed = descriptionPuckCell(bySlug.get(row.slug)?.descriptionPuck ?? null)
     const productId = idBySlug.get(row.slug)
+    // A real number, not the string "3", so the column sorts and sums like one.
+    // A product with no variations gets a plain 0 rather than a blank: blank
+    // would read as "we do not know", and 0 is the honest answer.
+    const variations: CellValue = productId ? variationCounts.get(productId) ?? 0 : 0
     const cols = productId ? colsByProduct.get(productId) ?? [] : []
     const values = productId ? valuesByProduct.get(productId) ?? {} : {}
     // Attribute/extra-field columns have no fixed type: a numeric one must go in
@@ -106,7 +131,7 @@ export async function buildProductsGrid(): Promise<CellValue[][]> {
       const col = cols.find((c) => c.label === label)
       return coerceOpenCell(col ? values[col.key] ?? '' : '')
     })
-    grid.push([...base, designed, ...fieldCells])
+    grid.push([...base, designed, variations, ...fieldCells])
   }
   return grid
 }
@@ -118,10 +143,10 @@ const PRODUCT_KEYS = [['sku'], ['slug']]
 
 // The Products header is a closed set, so a column beyond the pushed grid can be
 // told apart from one the owner added themselves with certainty. The designed
-// description is ours too, even though it is not one of shop's CSV columns -
-// leave it out and a Push would treat it as the owner's own column, shove it
-// rightwards to make room and then never clear it.
-const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set<string>([...CSV_COLUMNS, DESCRIPTION_PUCK_COLUMN])
+// description and the variation count are ours too, even though neither is one of
+// shop's CSV columns - leave one out and a Push would treat it as the owner's own
+// column, shove it rightwards to make room and then never clear it.
+const PRODUCT_COLUMN_NAMES: ReadonlySet<string> = new Set<string>([...CSV_COLUMNS, DESCRIPTION_PUCK_COLUMN, VARIATIONS_COLUMN])
 
 // Write an already-built Products grid to the Products tab. Split out from
 // buildProductsGrid so a resumable Push can snapshot the grid once at start (for a
