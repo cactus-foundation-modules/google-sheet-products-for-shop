@@ -49,7 +49,7 @@ type SyncLog = {
   id: string
   direction: 'PUSH' | 'PULL'
   tab: 'PRODUCTS' | 'VARIATIONS'
-  status: 'COMPLETED' | 'FAILED'
+  status: 'COMPLETED' | 'COMPLETED_WITH_ERRORS' | 'FAILED'
   createdCount: number
   updatedCount: number
   skippedCount: number
@@ -1045,9 +1045,26 @@ function LogsModal({ onClose }: { onClose: () => void }) {
                 <td>{l.direction === 'PUSH' ? 'Push' : 'Pull'}</td>
                 <td>{l.tab === 'PRODUCTS' ? 'Products' : 'Variations'}</td>
                 <td>
-                  {l.status === 'FAILED'
-                    ? <span style={{ color: 'var(--color-danger)' }}>Failed</span>
-                    : `+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} ${l.tab === 'VARIATIONS' ? 'removed' : 'deleted'}` : ''}${l.errors?.length ? `, ${l.errors.length} error(s)` : ''}`}
+                  {l.status === 'FAILED' ? (
+                    <span style={{ color: 'var(--color-danger)' }}>Failed</span>
+                  ) : (
+                    <>
+                      {`+${l.createdCount} new, ${l.updatedCount} updated${l.archivedCount ? `, ${l.archivedCount} ${l.tab === 'VARIATIONS' ? 'removed' : 'deleted'}` : ''}`}
+                      {/* Errors judged by the stored rows, not the status, so runs
+                          logged as plain COMPLETED before the partial status
+                          existed still show their failures. */}
+                      {(l.errors?.length ?? 0) > 0 && (
+                        <details style={{ display: 'inline-block', marginLeft: '0.375rem' }}>
+                          <summary style={{ cursor: 'pointer', color: 'var(--color-warning)', fontWeight: 600 }}>
+                            {n(l.errors!.length, 'row')} failed
+                          </summary>
+                          <ul style={{ ...muted, margin: '0.25rem 0 0.25rem 1rem' }}>
+                            {l.errors!.map((e, i) => <li key={i}>Row {e.row}: {e.reason}</li>)}
+                          </ul>
+                        </details>
+                      )}
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

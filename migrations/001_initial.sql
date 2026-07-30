@@ -59,7 +59,7 @@ END $$;
 
 DO $$ BEGIN
     ALTER TABLE "gsp_sync_log"
-        ADD CONSTRAINT "gsp_sync_log_status_check" CHECK ("status" IN ('COMPLETED', 'FAILED'));
+        ADD CONSTRAINT "gsp_sync_log_status_check" CHECK ("status" IN ('COMPLETED', 'COMPLETED_WITH_ERRORS', 'FAILED'));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

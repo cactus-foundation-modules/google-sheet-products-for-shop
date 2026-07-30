@@ -24,7 +24,7 @@ export type GspConnection = {
 
 export type SyncDirection = 'PUSH' | 'PULL'
 export type SyncTab = 'PRODUCTS' | 'VARIATIONS'
-export type SyncStatus = 'COMPLETED' | 'FAILED'
+export type SyncStatus = 'COMPLETED' | 'COMPLETED_WITH_ERRORS' | 'FAILED'
 export type SyncRowError = { row: number; reason: string }
 
 export type GspSyncLog = {

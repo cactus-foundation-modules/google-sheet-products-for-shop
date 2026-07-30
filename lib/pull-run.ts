@@ -145,18 +145,25 @@ async function finalizePullJob(job: PullJob): Promise<void> {
   `
   if (claimed.length === 0) return
   // Rows the start-of-pull diff proved identical never reached the importers;
-  // they are skips all the same, and the audit log should say so.
+  // they are skips all the same, and the audit log should say so. A run whose
+  // rows errored is not a clean success either - logging it as plain COMPLETED
+  // hid every SKU-blocked row from the owner, so a tab with errors is recorded
+  // as COMPLETED_WITH_ERRORS instead.
+  const prodErrors = job.prodErrors ?? []
+  const varErrors = job.varErrors ?? []
   await writeSyncLog({
-    direction: 'PULL', tab: 'PRODUCTS', status: 'COMPLETED',
+    direction: 'PULL', tab: 'PRODUCTS',
+    status: prodErrors.length ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED',
     createdCount: job.prodCreated, updatedCount: job.prodUpdated,
     skippedCount: job.prodSkipped + (job.detected?.productsUnchanged ?? 0),
-    archivedCount: job.prodDeleted, errors: job.prodErrors ?? [], runBy: job.runBy,
+    archivedCount: job.prodDeleted, errors: prodErrors, runBy: job.runBy,
   })
   await writeSyncLog({
-    direction: 'PULL', tab: 'VARIATIONS', status: 'COMPLETED',
+    direction: 'PULL', tab: 'VARIATIONS',
+    status: varErrors.length ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED',
     createdCount: job.varCreated, updatedCount: job.varUpdated,
     skippedCount: job.detected?.variationsUnchanged ?? 0,
-    archivedCount: job.varDeleted, errors: job.varErrors ?? [], runBy: job.runBy,
+    archivedCount: job.varDeleted, errors: varErrors, runBy: job.runBy,
   })
   await stampLastPull()
   await updatePullJob(job.id, { clearGrids: true })
