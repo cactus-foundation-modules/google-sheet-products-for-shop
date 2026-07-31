@@ -23,7 +23,7 @@ function mapConnection(r: Record<string, unknown>): GspConnection {
     lastPullAt: (r.last_pull_at as Date | null) ?? null,
     lastPushAttemptAt: (r.last_push_attempt_at as Date | null) ?? null,
     variationTabManifest: Array.isArray(r.variation_tab_manifest)
-      ? (r.variation_tab_manifest as Array<{ slug: string; title: string }>)
+      ? (r.variation_tab_manifest as Array<{ slug: string; title: string; hash?: string }>)
       : null,
   }
 }
@@ -157,8 +157,10 @@ export async function stampLastPull(): Promise<void> {
 
 // Record which variation tabs the Push just wrote, so the Pull can refuse when one
 // has since been renamed or deleted (see lib/variation-tabs.ts). Written once, at
-// the end of a successful Push, replacing the previous manifest wholesale.
-export async function setVariationTabManifest(manifest: Array<{ slug: string; title: string }>): Promise<void> {
+// the end of a successful Push, replacing the previous manifest wholesale. Each
+// entry also carries the pushed grid's fingerprint so the NEXT Push can skip a
+// tab whose content has not moved (see lib/push-run.ts).
+export async function setVariationTabManifest(manifest: Array<{ slug: string; title: string; hash?: string }>): Promise<void> {
   await ensureRow()
   await prisma.$executeRaw`
     UPDATE "gsp_connection" SET "variation_tab_manifest" = ${JSON.stringify(manifest)}::jsonb, "updated_at" = CURRENT_TIMESTAMP

@@ -222,6 +222,79 @@ export async function readGridWithFormulas(spreadsheetId: string, tab: string): 
   )
 }
 
+// Batched spreadsheets.get with grid data: readGridWithFormulas for MANY tabs in
+// as few calls as the URL length allows. One call is ONE token against the read
+// quota however many tabs it carries - the same economics that made Pull's
+// readGridsBatch viable, applied to the Push's per-tab pre-read (which used to be
+// one spreadsheets.get, and one quota token, per tab). Tabs come back keyed by
+// title; a tab Google did not return (deleted mid-push) is simply absent, exactly
+// as readGridWithFormulas would have returned an empty grid.
+export async function readGridsWithFormulasBatch(spreadsheetId: string, tabs: string[]): Promise<Record<string, SheetCell[][]>> {
+  const out: Record<string, SheetCell[][]> = {}
+  if (tabs.length === 0) return out
+  const fields = encodeURIComponent('sheets(properties.title,data.rowData.values(userEnteredValue,effectiveValue))')
+  for (const group of batchGetGroups(tabs)) {
+    const ranges = group.map((t) => `ranges=${tabRange(t)}`).join('&')
+    const res = await ok(
+      await googleFetch(`${SHEETS_API}/${spreadsheetId}?${ranges}&includeGridData=true&fields=${fields}`, {
+        method: 'GET',
+      }),
+      'read grids with formulas'
+    )
+    const data = (await res.json()) as {
+      sheets?: Array<{
+        properties?: { title?: string }
+        data?: Array<{ rowData?: Array<{ values?: Array<{ userEnteredValue?: ExtendedValue; effectiveValue?: ExtendedValue }> }> }>
+      }>
+    }
+    // Sheets are matched by TITLE, not request order: the response carries one
+    // entry per sheet that matched a range, in the spreadsheet's own tab order.
+    for (const sheet of data.sheets ?? []) {
+      const title = sheet.properties?.title
+      if (title === undefined) continue
+      const rowData = sheet.data?.[0]?.rowData ?? []
+      out[title] = rowData.map((row) =>
+        (row.values ?? []).map((cell) => ({
+          formula: cell.userEnteredValue?.formulaValue ?? null,
+          value: stringifyExtended(cell.effectiveValue),
+          error: cell.effectiveValue?.errorValue !== undefined,
+        }))
+      )
+    }
+  }
+  return out
+}
+
+// values.batchUpdate at RAW for MANY whole-tab grids in one call - the batched
+// twin of writeGrid, and one write-quota token however many tabs it carries. The
+// RAW guarantee is the same: no cell is ever evaluated.
+export async function writeGridsBatch(spreadsheetId: string, writes: Array<{ tab: string; values: CellValue[][] }>): Promise<void> {
+  if (writes.length === 0) return
+  await ok(
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchUpdate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        valueInputOption: 'RAW',
+        data: writes.map((w) => ({ range: `'${w.tab}'!A1`, values: w.values })),
+      }),
+    }),
+    'write grids'
+  )
+}
+
+// values.batchClear over ranges that may span several tabs - one write-quota
+// token for what clearRange spent one on PER range.
+export async function batchClearRanges(spreadsheetId: string, ranges: Array<{ tab: string; a1: string }>): Promise<void> {
+  if (ranges.length === 0) return
+  await ok(
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchClear`, {
+      method: 'POST',
+      body: JSON.stringify({ ranges: ranges.map((r) => `'${r.tab}'!${r.a1}`) }),
+    }),
+    'clear ranges'
+  )
+}
+
 // 0-based column index -> A1 column letters (0 -> A, 26 -> AA).
 export function columnLetter(index: number): string {
   let n = index
@@ -252,13 +325,15 @@ export type FormulaRun = { row: number; col: number; formulas: string[] }
 // values.batchUpdate at USER_ENTERED - the only write in this module that lets
 // Sheets interpret a cell, and it only ever receives formula text that was
 // already in the sheet. Every value that originates from the database goes
-// through writeGrid at RAW, so a product named "=cmd" can never be evaluated.
-export async function writeFormulaRuns(spreadsheetId: string, tab: string, runs: FormulaRun[]): Promise<void> {
+// through writeGrid/writeGridsBatch at RAW, so a product named "=cmd" can never
+// be evaluated. Runs carry their tab so one call restores across every tab a
+// batched push touched.
+export async function writeFormulaRuns(spreadsheetId: string, runs: Array<FormulaRun & { tab: string }>): Promise<void> {
   if (runs.length === 0) return
   const body = JSON.stringify({
     valueInputOption: 'USER_ENTERED',
     data: runs.map((run) => ({
-      range: `'${tab}'!${columnLetter(run.col)}${run.row + 1}`,
+      range: `'${run.tab}'!${columnLetter(run.col)}${run.row + 1}`,
       values: [run.formulas],
     })),
   })
@@ -287,15 +362,15 @@ export async function writeFormulaRuns(spreadsheetId: string, tab: string, runs:
 // values.batchUpdate at RAW for a handful of scattered cells - the flatten-back
 // path when a preserved formula's post-push result no longer matches the database
 // (a precedent changed in the same push). Same RAW guarantee as writeGrid: no
-// cell is ever evaluated.
-export async function writeRawCells(spreadsheetId: string, tab: string, cells: Array<{ row: number; col: number; value: CellValue }>): Promise<void> {
+// cell is ever evaluated. Cells carry their tab for the same reason formula runs do.
+export async function writeRawCells(spreadsheetId: string, cells: Array<{ tab: string; row: number; col: number; value: CellValue }>): Promise<void> {
   if (cells.length === 0) return
   await ok(
     await googleFetch(`${SHEETS_API}/${spreadsheetId}/values:batchUpdate`, {
       method: 'POST',
       body: JSON.stringify({
         valueInputOption: 'RAW',
-        data: cells.map((c) => ({ range: `'${tab}'!${columnLetter(c.col)}${c.row + 1}`, values: [[c.value]] })),
+        data: cells.map((c) => ({ range: `'${c.tab}'!${columnLetter(c.col)}${c.row + 1}`, values: [[c.value]] })),
       }),
     }),
     'flatten formulas'

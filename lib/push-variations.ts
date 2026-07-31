@@ -1,6 +1,6 @@
 import { exportVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { parseCsv } from '@/modules/shop/lib/csv'
-import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
+import { pushGrids, type PushGridResult } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 import { splitWideGridByProduct, type ProductTab } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
@@ -93,20 +93,21 @@ export async function buildVariationTabs(): Promise<ProductTab[]> {
   return splitWideGridByProduct(wide)
 }
 
-// DB -> one product's variation tab. Returns the number of variant rows written
-// (excl. header) and how many of the owner's formulas survived. Formula
-// preservation, row/column alignment and stale-row clearing all work per tab
-// exactly as they did for the single wide tab - each tab is just narrower.
-export async function pushOneVariationTab(
+// DB -> a batch of products' variation tabs in one pass. Returns one result per
+// tab, in input order: variant rows written (excl. header), how many of the
+// owner's formulas survived, and whether the tab was skipped as already
+// identical. Formula preservation, row/column alignment and stale-row clearing
+// all work per tab exactly as they did one at a time (see planTabPush) - only
+// the transport is batched, which is what gets a big catalogue under Google's
+// sixty-calls-a-minute quotas.
+export async function pushVariationTabsBatch(
   spreadsheetId: string,
-  tabTitle: string,
-  grid: CellValue[][],
-): Promise<{ rowCount: number; preservedFormulas: number }> {
-  return pushGrid({
-    spreadsheetId,
-    tab: tabTitle,
-    grid,
-    keyStrategies: variationKeys((grid[0] ?? []).map(String)),
+  tabs: Array<{ title: string; grid: CellValue[][] }>,
+): Promise<PushGridResult[]> {
+  return pushGrids(spreadsheetId, tabs.map((t) => ({
+    tab: t.title,
+    grid: t.grid,
+    keyStrategies: variationKeys((t.grid[0] ?? []).map(String)),
     ownsColumn: (header) => isFixedVariationColumn(header),
-  })
+  })))
 }

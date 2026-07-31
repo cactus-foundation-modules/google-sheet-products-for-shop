@@ -172,6 +172,39 @@ export async function ensureVariationTab(spreadsheetId: string, title: string): 
   return true
 }
 
+// Create MANY variation tabs in one batchUpdate, formatting included - one write
+// where the one-at-a-time path spent two writes and a read per tab. The caller
+// has already checked which titles are missing (against its own getSheetIds
+// read), so this never re-checks. addSheet is given an EXPLICIT sheetId, chosen
+// clear of every id in `existingIds`, which is what lets the formatting requests
+// in the same call reference the new sheet before Google has named one.
+// batchUpdate is atomic, so a failure creates nothing rather than half the tabs.
+// Returns the id assigned to each title.
+export async function createVariationTabsBatch(
+  spreadsheetId: string,
+  titles: string[],
+  existingIds: Iterable<number>,
+): Promise<Record<string, number>> {
+  const assigned: Record<string, number> = {}
+  if (titles.length === 0) return assigned
+  const taken = new Set<number>(existingIds)
+  // Sequential from just past the largest known id - well inside int32, and
+  // collision-free against everything the caller can see.
+  let next = Math.max(0, ...taken) + 1
+  const requests: unknown[] = []
+  for (const title of titles) {
+    while (taken.has(next)) next++
+    const sheetId = next
+    taken.add(sheetId)
+    assigned[title] = sheetId
+    // Slot new product tabs right after Products, same as ensureVariationTab.
+    requests.push({ addSheet: { properties: { sheetId, title, index: 1 } } })
+    requests.push(...headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE))
+  }
+  await batchUpdate(spreadsheetId, requests)
+  return assigned
+}
+
 /**
  * Make sure the Suppliers tab exists, formatting it on the way in.
  *

@@ -1,6 +1,6 @@
 {
   "name": "google-sheet-products-for-shop",
-  "version": "0.1.52",
+  "version": "0.1.53",
   "tablePrefix": "gsp_",
   "description": "Mirrors your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.",
   "requiresCoreVersion": "0.5.486",
@@ -25,7 +25,9 @@
   ],
   "requiredEnvVars": [
     { "name": "ENCRYPTION_KEY", "required": true },
-    { "name": "SITE_URL", "required": true }
+    { "name": "SITE_URL", "required": true },
+    { "name": "GSP_SHEETS_READS_PER_MINUTE", "required": false },
+    { "name": "GSP_SHEETS_WRITES_PER_MINUTE", "required": false }
   ],
   "cookieCategories": [],
   "teardown": ["gsp_connection", "gsp_sync_log", "gsp_pull_job", "gsp_push_job"],

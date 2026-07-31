@@ -19,7 +19,10 @@ export type GspConnection = {
   // Pull checks every slug here is still present in the sheet before merging, so a
   // renamed or deleted tab is caught rather than read as "these variants are gone"
   // (see lib/variation-tabs.ts missingManifestSlugs). Null before the first Push.
-  variationTabManifest: Array<{ slug: string; title: string }> | null
+  // `hash` fingerprints the grid that Push wrote (see lib/grid-hash.ts) so the
+  // next Push can skip a tab whose content has not moved; absent on manifests
+  // written before it existed, which simply means no skipping that first time.
+  variationTabManifest: Array<{ slug: string; title: string; hash?: string }> | null
 }
 
 export type SyncDirection = 'PUSH' | 'PULL'

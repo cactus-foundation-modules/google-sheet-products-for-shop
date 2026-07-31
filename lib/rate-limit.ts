@@ -65,10 +65,20 @@ export class TokenBucket {
   }
 }
 
+// Google's default is 60 a minute, but the per-user quota is adjustable in the
+// Google Cloud Console (IAM & Admin -> Quotas, sheets.googleapis.com). An owner
+// who has had theirs raised tells the module through these env vars so the token
+// buckets actually use the headroom; anything unset or nonsense stays at 60.
+// Read once at module load, the same lifetime as the buckets themselves.
+export function perMinuteFromEnv(raw: string | undefined, fallback: number = REQUESTS_PER_MINUTE): number {
+  const n = Number(raw)
+  return raw !== undefined && raw.trim() !== '' && Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback
+}
+
 // Google counts reads and writes against separate quotas, so they get separate
 // buckets: a Push's writes must not slow down the reads it interleaves with them.
-const readBucket = new TokenBucket(REQUESTS_PER_MINUTE)
-const writeBucket = new TokenBucket(REQUESTS_PER_MINUTE)
+const readBucket = new TokenBucket(perMinuteFromEnv(process.env.GSP_SHEETS_READS_PER_MINUTE))
+const writeBucket = new TokenBucket(perMinuteFromEnv(process.env.GSP_SHEETS_WRITES_PER_MINUTE))
 
 export function awaitSlot(isRead: boolean): Promise<void> {
   return (isRead ? readBucket : writeBucket).take()
