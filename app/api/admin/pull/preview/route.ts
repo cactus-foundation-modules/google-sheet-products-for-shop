@@ -4,9 +4,10 @@ import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
-import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { readGrid, getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
+import { saveSheetSnapshot } from '@/modules/google-sheet-products-for-shop/lib/sheet-snapshot'
 import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { buildPullPreview } from '@/modules/google-sheet-products-for-shop/lib/preview'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
@@ -70,7 +71,14 @@ export async function POST() {
   // says what actually happened.
   let productsGrid: string[][]
   let variationsGrid: string[][]
+  let modifiedAt: Date | null = null
   try {
+    // modifiedTime is fetched BEFORE the grids: if the sheet is edited while the
+    // grids are being read, the stored time predates the edit, the Pull's own
+    // modifiedTime fetch sees a later instant, and the (possibly torn) snapshot
+    // is simply not reused. Fetched after, the race would run the other way -
+    // a snapshot of the old content filed under the new time.
+    modifiedAt = await getSheetModifiedTime(conn.spreadsheetId)
     ;[productsGrid, variationsGrid] = await Promise.all([
       readGrid(conn.spreadsheetId, TAB.PRODUCTS),
       readMergedVariations(conn.spreadsheetId),
@@ -80,6 +88,15 @@ export async function POST() {
     const reason = sheetFailureReason(err)
     console.error('[google-sheet-products-for-shop/preview] sheet read failed:', reason)
     return errorResponse(`Could not read the Google Sheet. ${reason}`, 502)
+  }
+
+  // Keep what was just read so a Pull started off this preview can skip the
+  // identical sweep (see lib/sheet-snapshot.ts). Best-effort: a failed save
+  // costs the Pull a re-read, never the preview.
+  if (modifiedAt !== null) {
+    await saveSheetSnapshot({ productsGrid, variationsGrid, driveModifiedTime: modifiedAt }).catch((err) => {
+      console.error('[google-sheet-products-for-shop/preview] snapshot save failed:', err)
+    })
   }
 
   // Same guard the Pull itself uses: a product tab renamed or deleted since the

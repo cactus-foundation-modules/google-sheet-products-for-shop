@@ -30,7 +30,11 @@ const VAR_ROW_CHUNK = 50
 // request before the phase could advance, the next step started the import over,
 // and the Pull sat on "Updating products…" forever. Chunked, every chunk banks
 // its cursor (products_done) and a step ends at the time budget like variations.
-const PROD_ROW_CHUNK = 25
+// 40 rather than the original 25: each call re-parses the CSV and re-resolves
+// the column map, so fewer, bigger chunks waste less of the budget on setup -
+// and chunk size never risks the ceiling, because the step's 35s clock decides
+// when to stop starting chunks either way.
+const PROD_ROW_CHUNK = 40
 
 // How long one /pull/step keeps starting new chunks. Well under the module
 // dispatcher's 60s ceiling so the slowest single chunk still finishes and gets

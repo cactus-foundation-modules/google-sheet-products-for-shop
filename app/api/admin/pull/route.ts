@@ -5,9 +5,10 @@ import { errorResponse } from '@/lib/utils'
 import { createImportJob, markImportJobStarted, markImportJobCompleted } from '@/modules/shop/lib/db/import-jobs'
 import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { readGrid, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { readGrid, getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
+import { loadSheetSnapshot, snapshotIsCurrent } from '@/modules/google-sheet-products-for-shop/lib/sheet-snapshot'
 import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { diffProductRows, diffVariationRows, filterGridByDiff } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
@@ -58,11 +59,28 @@ export async function POST() {
   // Read the Products tab and merge every per-product variation tab up front, so an
   // auth failure or a mangled header is reported synchronously, before we create
   // any job or touch the database.
+  //
+  // Usually a preview ran seconds ago and stored exactly these grids beside the
+  // sheet's Drive modifiedTime. One Drive call tells us whether the sheet has
+  // moved since: an EXACT modifiedTime match means the sheet is byte-for-byte
+  // what the preview read, so the whole sweep is skipped; anything else - an
+  // edit, a Push, no snapshot, Drive not answering - reads fresh exactly as
+  // before. The catalogue diff below is recomputed either way, so a change on
+  // the DATABASE side between preview and pull is always picked up.
   let productsGrid: string[][]
   let variationsGrid: string[][]
   try {
-    productsGrid = await readGrid(conn.spreadsheetId, TAB.PRODUCTS)
-    variationsGrid = await readMergedVariations(conn.spreadsheetId)
+    const [snapshot, modifiedAt] = await Promise.all([
+      loadSheetSnapshot().catch(() => null),
+      getSheetModifiedTime(conn.spreadsheetId),
+    ])
+    if (snapshot && snapshotIsCurrent(snapshot.driveModifiedTime, modifiedAt)) {
+      productsGrid = snapshot.productsGrid
+      variationsGrid = snapshot.variationsGrid
+    } else {
+      productsGrid = await readGrid(conn.spreadsheetId, TAB.PRODUCTS)
+      variationsGrid = await readMergedVariations(conn.spreadsheetId)
+    }
   } catch (err) {
     if (err instanceof GoogleAuthError) return errorResponse(err.message, 400)
     const reason = sheetFailureReason(err)
