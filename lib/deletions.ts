@@ -4,6 +4,7 @@ import { listProducts } from '@/modules/shop/lib/db'
 import { collectPaged } from '@/modules/shop/lib/csv'
 import { slugify } from '@/modules/shop/lib/slug'
 import { getEditorPayloadsBatch } from '@/modules/shop-variations/lib/variants-service'
+import { parseValueCell } from '@/modules/shop-variations/lib/value-cell'
 import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import type { ShpProduct } from '@/modules/shop/lib/types'
 
@@ -159,8 +160,19 @@ export async function planPullDeletions(
     if (!payload) continue
     handled.add(parent.id)
 
+    // Slug first, bare label as the legacy fallback - the same resolution the
+    // Pull's diff and the importer apply to "(slug)Label" cells. On duplicate
+    // labels the label map keeps the first, which is why the Push writes slugs.
     const valueIdByKey = new Map<string, string>()
-    for (const o of payload.options) for (const v of o.values) valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
+    const valueIdBySlug = new Map<string, string>()
+    for (const o of payload.options) {
+      for (const v of o.values) {
+        if (!valueIdByKey.has(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`)) {
+          valueIdByKey.set(`${o.name.toLowerCase()}|${v.label.toLowerCase()}`, v.id)
+        }
+        valueIdBySlug.set(`${o.name.toLowerCase()}|${v.slug}`, v.id)
+      }
+    }
 
     const wanted = new Set<string>()
     for (const cols of rows) {
@@ -168,9 +180,12 @@ export async function planPullDeletions(
       let resolvable = true
       for (const pair of optionPairs) {
         const optName = (cols[pair.nameCol] ?? '').trim()
-        const valLabel = (cols[pair.valueCol] ?? '').trim()
-        if (!optName || !valLabel) continue
-        const id = valueIdByKey.get(`${optName.toLowerCase()}|${valLabel.toLowerCase()}`)
+        const rawCell = (cols[pair.valueCol] ?? '').trim()
+        if (!optName || !rawCell) continue
+        const parsed = parseValueCell(rawCell)
+        const id = parsed.slug
+          ? valueIdBySlug.get(`${optName.toLowerCase()}|${parsed.slug}`)
+          : valueIdByKey.get(`${optName.toLowerCase()}|${parsed.label.toLowerCase()}`)
         if (!id) { resolvable = false; break }
         ids.push(id)
       }
