@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db/prisma'
-import { missingFormatColumns } from '@/modules/shop/lib/csv'
+import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
+import { columnPrefsFrom, excludedProductColumns } from '@/modules/google-sheet-products-for-shop/lib/columns'
 import { diffProductRows, diffVariationRows } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import type { GspConnection, PullPreview, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
@@ -9,7 +10,9 @@ import type { GspConnection, PullPreview, SyncRowError } from '@/modules/google-
 // confirm dialog's counts are the Pull's counts - including "already match",
 // which is exactly the set of rows the Pull will skip.
 export async function buildPullPreview(productsGrid: string[][], variationsGrid: string[][], conn: GspConnection): Promise<PullPreview> {
-  const headerMissing = missingFormatColumns(productsGrid[0] ?? [])
+  // A column the owner has switched off is absent on purpose, so it is not
+  // "missing" - same rule the Pull itself applies before it will run.
+  const headerMissing = missingProductsColumns(productsGrid, excludedProductColumns(columnPrefsFrom(conn)))
 
   const toCreate: PullPreview['products']['toCreate'] = []
   const toUpdate: PullPreview['products']['toUpdate'] = []

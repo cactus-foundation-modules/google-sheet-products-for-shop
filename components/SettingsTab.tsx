@@ -8,6 +8,8 @@ type Settings = {
   googleAccountEmail: string | null
   spreadsheetId: string | null
   spreadsheetUrl: string | null
+  includeStock: boolean
+  includeTradePrice: boolean
   lastPushAt: string | null
   lastPullAt: string | null
   redirectUri: string | null
@@ -20,6 +22,8 @@ const EMPTY: Settings = {
   googleAccountEmail: null,
   spreadsheetId: null,
   spreadsheetUrl: null,
+  includeStock: true,
+  includeTradePrice: true,
   lastPushAt: null,
   lastPullAt: null,
   redirectUri: null,
@@ -73,12 +77,45 @@ function CopyField({ label, value }: { label: string; value: string }) {
   )
 }
 
+// One optional catalogue column, with the plain-English consequence of switching
+// it off underneath it.
+function ColumnToggle({
+  label,
+  detail,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string
+  detail: string
+  checked: boolean
+  disabled: boolean
+  onChange: (value: boolean) => void
+}) {
+  return (
+    <label style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start', cursor: disabled ? 'default' : 'pointer', marginBottom: '0.85rem' }}>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ marginTop: '0.2rem' }}
+      />
+      <span>
+        <span style={{ display: 'block', color: 'var(--color-text)' }}>{label}</span>
+        <span style={{ ...muted, fontSize: '0.8125rem' }}>{detail}</span>
+      </span>
+    </label>
+  )
+}
+
 export function GoogleSheetSettingsTab() {
   const [settings, setSettings] = useState<Settings>(EMPTY)
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [savingColumn, setSavingColumn] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
@@ -119,6 +156,28 @@ export function GoogleSheetSettingsTab() {
       await refresh()
     } else {
       setMessage((await res.json().catch(() => ({}))).error ?? 'Save failed.')
+    }
+  }
+
+  // Column checkboxes save on the spot - one box, one setting, nothing to submit.
+  // The box moves straight away and is put back if the save fails, so the tab
+  // never shows a setting the server did not take.
+  async function saveColumn(key: 'includeStock' | 'includeTradePrice', value: boolean) {
+    const previous = settings[key]
+    setSettings((s) => ({ ...s, [key]: value }))
+    setSavingColumn(key)
+    setMessage(null)
+    const res = await fetch(`${BASE}/settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [key]: value }),
+    })
+    setSavingColumn(null)
+    if (res.ok) {
+      setMessage('Saved. Push to the sheet to apply it.')
+    } else {
+      setSettings((s) => ({ ...s, [key]: previous }))
+      setMessage((await res.json().catch(() => ({}))).error ?? 'Could not save that.')
     }
   }
 
@@ -240,6 +299,35 @@ export function GoogleSheetSettingsTab() {
           )}
         </div>
       </form>
+
+      {/* --- What goes in the sheet --- */}
+      <div className="card" style={{ marginBottom: '1.5rem' }}>
+        <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>What goes in the sheet</div>
+        <p style={{ ...muted, fontSize: '0.875rem', marginBottom: '1rem' }}>
+          Two columns you can leave out, for when the sheet is going somewhere you would rather they didn&rsquo;t.
+          Leave a column out and it stops travelling in both directions: it disappears from the sheet on your next
+          Push, and a Pull leaves that figure exactly as it is on your website.
+        </p>
+
+        <ColumnToggle
+          label="Stock count"
+          detail="The stock figure on the Products tab, and the Stock column on each product's own tab. Your inventory settings are unaffected either way."
+          checked={settings.includeStock}
+          disabled={savingColumn !== null}
+          onChange={(v) => saveColumn('includeStock', v)}
+        />
+        <ColumnToggle
+          label="Trade price"
+          detail="Your trade price on the Products tab and on each product's own tab."
+          checked={settings.includeTradePrice}
+          disabled={savingColumn !== null}
+          onChange={(v) => saveColumn('includeTradePrice', v)}
+        />
+
+        <p style={{ ...muted, fontSize: '0.8125rem', marginBottom: 0 }}>
+          Switch one back on and the column returns on the next Push, filled in from your website.
+        </p>
+      </div>
 
       {/* --- The sheet --- */}
       <div className="card">

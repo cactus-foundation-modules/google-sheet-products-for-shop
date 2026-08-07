@@ -105,6 +105,21 @@ describe('splitWideGridByProduct', () => {
     }
   })
 
+  it('drops a switched-off fixed column from every tab, keeping the rest', () => {
+    const narrowed = splitWideGridByProduct(WIDE, ['Stock', 'Trade Price'])
+    for (const t of narrowed) {
+      expect(t.grid[0]!).not.toContain('Stock')
+      expect(t.grid[0]!).not.toContain('Trade Price')
+      expect(t.grid[0]!).toContain('Cost Price')
+      expect(t.grid[0]!).toContain('Price')
+    }
+    // The remaining cells still line up with their headers.
+    const h = narrowed[0]!.grid[0]!
+    const row = narrowed[0]!.grid[1]!
+    expect(row[h.indexOf('Cost Price')]).toBe('150')
+    expect(row[h.indexOf('Variant ID')]).toBe('child-1')
+  })
+
   it('carries the variant values across intact', () => {
     // desk row 1: Finish=Oak, Size=1400, price 299, Material "Solid oak"
     const desk = tabs[0]!.grid
@@ -151,6 +166,35 @@ describe('mergeVariationTabs', () => {
         expect(mrow[mh.indexOf(col)], `${slug} ${col}`).toBe(orig[wh.indexOf(col)])
       }
     }
+  })
+
+  it('leaves out a fixed column no tab carries, rather than merging it in blank', () => {
+    // A column of blanks would read to the importer as "clear every variant's
+    // stock", which is exactly what switching the column off must NOT do.
+    const tabs = splitWideGridByProduct(WIDE, ['Stock', 'Trade Price']).map((t) => t.grid as string[][])
+    const merged = mergeVariationTabs(tabs)
+    const h = merged[0]!
+    expect(h).not.toContain('Stock')
+    expect(h).not.toContain('Trade Price')
+    expect(h).toContain('Cost Price')
+    const deskRow = merged.find((r) => r[h.indexOf('Variant ID')] === 'child-1')!
+    expect(deskRow[h.indexOf('Cost Price')]).toBe('150')
+  })
+
+  it('keeps a fixed column that only some tabs carry', () => {
+    // Mid-changeover: one tab still has Stock from an older Push. That column is
+    // real data, so it stays - and the tab without it merges blank as before.
+    const [deskGrid, stoolGrid] = splitWideGridByProduct(WIDE).map((t) => t.grid as string[][])
+    const stoolNoStock = splitWideGridByProduct(
+      [WIDE[0]!, WIDE[3]!],
+      ['Stock'],
+    ).map((t) => t.grid as string[][])[0]!
+    expect(stoolGrid![0]!).toContain('Stock')
+    const merged = mergeVariationTabs([deskGrid!, stoolNoStock])
+    const h = merged[0]!
+    expect(h).toContain('Stock')
+    expect(merged.find((r) => r[h.indexOf('Variant ID')] === 'child-1')![h.indexOf('Stock')]).toBe('5')
+    expect(merged.find((r) => r[h.indexOf('Variant ID')] === 'child-3')![h.indexOf('Stock')]).toBe('')
   })
 
   it('drops wholly blank padding rows', () => {

@@ -8,12 +8,18 @@ import { pushGrid } from '@/modules/google-sheet-products-for-shop/lib/push-grid
 import { DESCRIPTION_PUCK_COLUMN, descriptionPuckCell } from '@/modules/google-sheet-products-for-shop/lib/description-puck'
 import { VARIATIONS_COLUMN, getVariationCounts } from '@/modules/google-sheet-products-for-shop/lib/variation-count'
 import { TAB, applyProductsValidation } from '@/modules/google-sheet-products-for-shop/lib/workbook'
+import { DEFAULT_COLUMN_PREFS, excludedProductColumns, type ColumnPrefs } from '@/modules/google-sheet-products-for-shop/lib/columns'
 
-// The full Products header. Cost price is always included - the owner asked for
-// it to go every time rather than sit behind an on/off setting. It is a reference
+// The Products header. Cost price is always included - the owner asked for it to
+// go every time rather than sit behind an on/off setting. It is a reference
 // figure like RRP and trade, and anyone the sheet is shared with can see it.
-export function productColumns(): CsvColumn[] {
-  return [...CSV_COLUMNS]
+//
+// Stock count and trade price DO sit behind a setting (see lib/columns.ts); a
+// switched-off column simply never reaches the grid, and the Push clears the one
+// the sheet still has left over from last time.
+export function productColumns(prefs: ColumnPrefs = DEFAULT_COLUMN_PREFS): CsvColumn[] {
+  const excluded = new Set<string>(excludedProductColumns(prefs))
+  return CSV_COLUMNS.filter((c) => !excluded.has(c))
 }
 
 // A header as the Pull normalises it (lowercased, spaces to underscores), so a
@@ -49,9 +55,9 @@ function typedCell(column: CsvColumn, value: string): CellValue {
 // directly rather than round-tripping through CSV text: the write is RAW, so
 // shop's formula-injection guard (which prefixes a leading apostrophe) is both
 // redundant and would show the owner a stray ' in their cells.
-export async function buildProductsGrid(): Promise<CellValue[][]> {
+export async function buildProductsGrid(prefs: ColumnPrefs = DEFAULT_COLUMN_PREFS): Promise<CellValue[][]> {
   const rows = await buildProductCsvRows()
-  const columns = productColumns()
+  const columns = productColumns(prefs)
 
   // Product-level attribute columns (and any other module's product fields),
   // appended after the fixed columns - the Products-tab twin of the extra-field

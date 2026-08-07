@@ -4,6 +4,7 @@ import { pushGrids, type PushGridResult } from '@/modules/google-sheet-products-
 import { type CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { coerceOpenCell } from '@/modules/google-sheet-products-for-shop/lib/numeric-cell'
 import { splitWideGridByProduct, type ProductTab } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
+import { DEFAULT_COLUMN_PREFS, excludedVariationColumns, type ColumnPrefs } from '@/modules/google-sheet-products-for-shop/lib/columns'
 
 // The variation columns that hold a number, not text. They go into the sheet as
 // JS numbers for the same reason the Products tab's do (see push-products.ts): a
@@ -88,9 +89,9 @@ function variationKeys(header: string[]): string[][] {
 // grid per product - each carrying only the option and field columns that product
 // uses (see lib/variation-tabs.ts). The Push writes one tab per entry, and a Pull
 // merges them back into the wide shape the pipeline still works off.
-export async function buildVariationTabs(): Promise<ProductTab[]> {
+export async function buildVariationTabs(prefs: ColumnPrefs = DEFAULT_COLUMN_PREFS): Promise<ProductTab[]> {
   const wide = await buildVariationsGrid()
-  return splitWideGridByProduct(wide)
+  return splitWideGridByProduct(wide, excludedVariationColumns(prefs))
 }
 
 // DB -> a batch of products' variation tabs in one pass. Returns one result per

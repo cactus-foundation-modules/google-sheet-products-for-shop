@@ -10,6 +10,11 @@ export type GspConnection = {
   googleAccountEmail: string | null
   spreadsheetId: string | null
   spreadsheetUrl: string | null
+  // Optional catalogue columns, on by default. Off means the column is left out
+  // of the next Push entirely and is therefore not synced back either - see
+  // lib/columns.ts for what each one covers on both tabs.
+  includeStock: boolean
+  includeTradePrice: boolean
   lastPushAt: Date | null
   lastPullAt: Date | null
   // Bumped after every tab a Push writes, so the "sheet edited since we synced"

@@ -145,11 +145,16 @@ export type ProductTab = { slug: string; name: string; grid: CellValue[][] }
 // prefix, since the export fills them from Option 1) and only the extra field
 // columns it has a value in - everything else is dropped, so the tab shows just
 // that product's attributes. The fixed columns are always present.
-export function splitWideGridByProduct(wide: CellValue[][]): ProductTab[] {
+// `excludedColumns` names fixed columns the owner has switched off (see
+// lib/columns.ts) - they are dropped from every tab, and the Push clears whatever
+// the sheet still holds under them. Everything else is unaffected.
+export function splitWideGridByProduct(wide: CellValue[][], excludedColumns: readonly string[] = []): ProductTab[] {
   const header = (wide[0] ?? []).map((c) => String(c))
   const layout = readLayout(header)
   if (layout.slug < 0) return []
   const dataRows = wide.slice(1)
+  const dropped = new Set(excludedColumns)
+  const fixedColumns = FIXED_MIDDLE_COLUMNS.filter((c) => !dropped.has(c))
 
   // Group rows by slug, first-seen order.
   const order: string[] = []
@@ -186,7 +191,7 @@ export function splitWideGridByProduct(wide: CellValue[][]): ProductTab[] {
     const narrowHeader: string[] = [
       SLUG_HEADER, NAME_HEADER,
       ...optionPairHeaders(usedOptions),
-      ...FIXED_MIDDLE_COLUMNS,
+      ...fixedColumns,
       ...keptFields.map((f) => f.label),
     ]
     const grid: CellValue[][] = [narrowHeader]
@@ -195,7 +200,7 @@ export function splitWideGridByProduct(wide: CellValue[][]): ProductTab[] {
       for (let i = 1; i <= usedOptions; i++) {
         out.push(cell(row, header.indexOf(`Option ${i}`)), cell(row, header.indexOf(`Value ${i}`)))
       }
-      for (const col of FIXED_MIDDLE_COLUMNS) out.push(cell(row, layout.fixed.get(col) ?? -1))
+      for (const col of fixedColumns) out.push(cell(row, layout.fixed.get(col) ?? -1))
       for (const f of keptFields) out.push(cell(row, f.index))
       grid.push(out)
     }
@@ -218,10 +223,17 @@ export function mergeVariationTabs(tabGrids: string[][][]): string[][] {
     for (const f of layout.fields) if (!fieldOrder.includes(f.label)) fieldOrder.push(f.label)
   }
 
+  // A fixed column NO tab carries is left out of the merged grid rather than
+  // merged in blank. That is what makes a switched-off column (see lib/columns.ts)
+  // stop syncing rather than start clearing: the importer skips a column the grid
+  // does not have, where a column of blanks reads as "every variant's stock is
+  // now nothing". The same holds for a column an owner has deleted by hand.
+  const fixedColumns = FIXED_MIDDLE_COLUMNS.filter((col) => layouts.some(({ layout }) => layout.fixed.has(col)))
+
   const mergedHeader: string[] = [
     SLUG_HEADER, NAME_HEADER,
     ...optionPairHeaders(maxOptions),
-    ...FIXED_MIDDLE_COLUMNS,
+    ...fixedColumns,
     ...fieldOrder,
   ]
 
@@ -238,7 +250,7 @@ export function mergeVariationTabs(tabGrids: string[][][]): string[][] {
       for (let i = 1; i <= maxOptions; i++) {
         out.push(at(row, (grid[0] ?? []).indexOf(`Option ${i}`)), at(row, (grid[0] ?? []).indexOf(`Value ${i}`)))
       }
-      for (const col of FIXED_MIDDLE_COLUMNS) out.push(at(row, layout.fixed.get(col) ?? -1))
+      for (const col of fixedColumns) out.push(at(row, layout.fixed.get(col) ?? -1))
       for (const label of fieldOrder) out.push(at(row, fieldIndexByLabel.get(label) ?? -1))
       merged.push(out)
     }

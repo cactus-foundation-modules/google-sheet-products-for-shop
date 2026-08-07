@@ -19,6 +19,10 @@ function mapConnection(r: Record<string, unknown>): GspConnection {
     googleAccountEmail: (r.google_account_email as string | null) ?? null,
     spreadsheetId: (r.spreadsheet_id as string | null) ?? null,
     spreadsheetUrl: (r.spreadsheet_url as string | null) ?? null,
+    // Absent on a row read before migration 011 landed; both columns default to
+    // true there too, so "not false" is the honest reading either way.
+    includeStock: r.include_stock !== false,
+    includeTradePrice: r.include_trade_price !== false,
     lastPushAt: (r.last_push_at as Date | null) ?? null,
     lastPullAt: (r.last_pull_at as Date | null) ?? null,
     lastPushAttemptAt: (r.last_push_attempt_at as Date | null) ?? null,
@@ -121,6 +125,26 @@ export async function clearTokens(): Promise<void> {
       "updated_at" = CURRENT_TIMESTAMP
     WHERE "id" = ${SINGLETON}
   `
+}
+
+// Which optional catalogue columns go in the sheet. Each is written only when the
+// caller passed it, so the settings tab can save one checkbox without restating
+// the other.
+export async function saveColumnPreferences(opts: { includeStock?: boolean; includeTradePrice?: boolean }): Promise<void> {
+  if (opts.includeStock === undefined && opts.includeTradePrice === undefined) return
+  await ensureRow()
+  if (opts.includeStock !== undefined) {
+    await prisma.$executeRaw`
+      UPDATE "gsp_connection" SET "include_stock" = ${opts.includeStock}, "updated_at" = CURRENT_TIMESTAMP
+      WHERE "id" = ${SINGLETON}
+    `
+  }
+  if (opts.includeTradePrice !== undefined) {
+    await prisma.$executeRaw`
+      UPDATE "gsp_connection" SET "include_trade_price" = ${opts.includeTradePrice}, "updated_at" = CURRENT_TIMESTAMP
+      WHERE "id" = ${SINGLETON}
+    `
+  }
 }
 
 export async function setSpreadsheet(opts: { spreadsheetId: string; spreadsheetUrl: string }): Promise<void> {

@@ -11,6 +11,7 @@ import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/l
 import { loadSheetSnapshot, snapshotIsCurrent } from '@/modules/google-sheet-products-for-shop/lib/sheet-snapshot'
 import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
+import { columnPrefsFrom, excludedProductColumns } from '@/modules/google-sheet-products-for-shop/lib/columns'
 import { diffProductRows, diffVariationRows, filterGridByDiff } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { createPullJob, getLatestUnfinishedPullJob, PullAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
@@ -88,7 +89,7 @@ export async function POST() {
     return errorResponse(`Could not read the Google Sheet. ${reason}`, 502)
   }
 
-  const missing = missingProductsColumns(productsGrid)
+  const missing = missingProductsColumns(productsGrid, excludedProductColumns(columnPrefsFrom(conn)))
   if (missing.length) {
     return errorResponse(`Your sheet's Products tab is missing these columns: ${missing.join(', ')}. Fix the header row (or reset the sheet) and try again.`, 400)
   }

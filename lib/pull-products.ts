@@ -2,8 +2,14 @@ import { missingFormatColumns, type CsvColumn } from '@/modules/shop/lib/csv'
 
 // Which required columns the sheet's Products header is missing. Empty = good.
 // Drives the plain-English refusal on Pull ("your sheet is missing: price, name").
-export function missingProductsColumns(grid: string[][]): CsvColumn[] {
-  return missingFormatColumns(grid[0] ?? [])
+//
+// `excluded` names the columns the owner has deliberately switched off (see
+// lib/columns.ts). Those are absent by design, so a Pull must not refuse over
+// them - it simply does not sync those fields, the same as any column the sheet
+// does not carry.
+export function missingProductsColumns(grid: string[][], excluded: readonly CsvColumn[] = []): CsvColumn[] {
+  const off = new Set<string>(excluded)
+  return missingFormatColumns(grid[0] ?? []).filter((c) => !off.has(c))
 }
 
 // Structural CSV escaping only - NOT shop's toCsvField. toCsvField prefixes a

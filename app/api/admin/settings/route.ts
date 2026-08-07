@@ -4,7 +4,7 @@ import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getSiteUrlOrNull } from '@/lib/config/env'
-import { getConnection, saveOAuthClient } from '@/modules/google-sheet-products-for-shop/lib/db'
+import { getConnection, saveOAuthClient, saveColumnPreferences } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { buildGoogleRedirectUri } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
 
 export async function GET() {
@@ -22,6 +22,8 @@ export async function GET() {
     googleAccountEmail: conn?.googleAccountEmail ?? null,
     spreadsheetId: conn?.spreadsheetId ?? null,
     spreadsheetUrl: conn?.spreadsheetUrl ?? null,
+    includeStock: conn?.includeStock ?? true,
+    includeTradePrice: conn?.includeTradePrice ?? true,
     lastPushAt: conn?.lastPushAt ?? null,
     lastPullAt: conn?.lastPullAt ?? null,
     // The two values the owner must paste into their Google OAuth client. The
@@ -35,16 +37,16 @@ export async function GET() {
 const Body = z.object({
   oauthClientId: z.string().min(1).optional(),
   oauthClientSecret: z.string().min(1).optional(),
+  // Optional catalogue columns. Sent on their own by the settings tab's
+  // checkboxes, so a PATCH carrying only these must not require credentials.
+  includeStock: z.boolean().optional(),
+  includeTradePrice: z.boolean().optional(),
 })
 
 export async function PATCH(request: NextRequest) {
   const user = await getSessionFromCookie()
   if (!user) return errorResponse('Not authenticated', 401)
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
-
-  if (!process.env.ENCRYPTION_KEY) {
-    return errorResponse('ENCRYPTION_KEY is not set. Add it to your environment before connecting Google.', 503)
-  }
 
   const parsed = Body.safeParse(await request.json())
   if (!parsed.success) return errorResponse(parsed.error.issues[0]?.message ?? 'Invalid input')
@@ -56,8 +58,15 @@ export async function PATCH(request: NextRequest) {
     return errorResponse('Enter both the client ID and the client secret.')
   }
   if (data.oauthClientId && data.oauthClientSecret) {
+    // Only the credentials need the key - a PATCH that just flips a column
+    // checkbox stores nothing encrypted and must not be refused for want of one.
+    if (!process.env.ENCRYPTION_KEY) {
+      return errorResponse('ENCRYPTION_KEY is not set. Add it to your environment before connecting Google.', 503)
+    }
     await saveOAuthClient(data.oauthClientId, data.oauthClientSecret)
   }
+
+  await saveColumnPreferences({ includeStock: data.includeStock, includeTradePrice: data.includeTradePrice })
 
   return NextResponse.json({ ok: true })
 }

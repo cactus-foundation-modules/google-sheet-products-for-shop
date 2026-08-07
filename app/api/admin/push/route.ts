@@ -8,6 +8,7 @@ import { createPushJob, getLatestUnfinishedPushJob, PushAlreadyRunningError } fr
 import { pushStatus } from '@/modules/google-sheet-products-for-shop/lib/push-run'
 import { buildProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/push-products'
 import { buildVariationTabs } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
+import { columnPrefsFrom } from '@/modules/google-sheet-products-for-shop/lib/columns'
 import { productTabTitle, RESERVED_TAB_TITLES } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
@@ -73,7 +74,10 @@ export async function POST(req: NextRequest) {
     // product. Titles are assigned here so a resumed step writes to the same tabs -
     // reusing the title the last Push gave each product (kept in the manifest) so an
     // existing tab is written into, not orphaned beside a fresh one.
-    const [productsGrid, productTabs] = await Promise.all([buildProductsGrid(), buildVariationTabs()])
+    // Which optional columns go in the sheet at all (stock, trade price) is the
+    // owner's setting, read here so both grids are built to the same shape.
+    const prefs = columnPrefsFrom(conn)
+    const [productsGrid, productTabs] = await Promise.all([buildProductsGrid(prefs), buildVariationTabs(prefs)])
 
     const manifestBySlug = new Map((conn.variationTabManifest ?? []).map((m) => [m.slug, m.title]))
     const taken = new Set<string>()
