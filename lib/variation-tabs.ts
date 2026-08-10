@@ -24,7 +24,7 @@ import type { CellValue } from '@/modules/google-sheet-products-for-shop/lib/she
 // contributes - a label we cannot enumerate, kept in first-seen order.
 const LEADING_COLUMNS = ['Parent Slug', 'Parent Name'] as const
 const FIXED_MIDDLE_COLUMNS = [
-  'Variant SKU', 'Price', ...PRICE_TYPE_COLUMNS, 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image', 'Variant ID',
+  'Variant SKU', 'Sale SKU', 'Price', ...PRICE_TYPE_COLUMNS, 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image', 'Variant ID',
 ] as const
 const OPTION_PAIR = /^(Option|Value) \d+$/
 

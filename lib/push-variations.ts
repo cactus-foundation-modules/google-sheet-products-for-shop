@@ -65,7 +65,7 @@ export async function buildVariationsGrid(): Promise<CellValue[][]> {
 // labels are arbitrary, so they cannot be listed here) or a column the owner
 // added. Both are left alone.
 const FIXED_VARIATION_COLUMNS: ReadonlySet<string> = new Set([
-  'Parent Slug', 'Parent Name', 'Variant SKU', 'Price', 'Sale Price', 'RRP', 'Trade Price', 'Cost Price', 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image', 'Variant ID',
+  'Parent Slug', 'Parent Name', 'Variant SKU', 'Sale SKU', 'Price', 'Sale Price', 'RRP', 'Trade Price', 'Cost Price', 'Stock', 'Barcode', 'Supplier', 'Weight', 'Image', 'Variant ID',
 ])
 const OPTION_PAIR = /^(Option|Value) \d+$/
 
