@@ -1,4 +1,5 @@
-import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, addTab } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, getSheetGrids, addTab } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { targetRows, targetColumns, MIN_COLUMNS, type PlannedTab } from '@/modules/google-sheet-products-for-shop/lib/capacity'
 
 // The fixed tabs, in order. Variations no longer has a single fixed tab: every
 // variable product gets its OWN tab (created on Push, see ensureVariationTab),
@@ -94,16 +95,30 @@ function readmeRows(): string[][] {
     ['- The cost_price column holds your supplier cost (your margin), and each product\'s variation tab carries the same figure per variant.'],
     ['- It is always included, so anyone you share this sheet with can see it. Share the sheet with that in mind.'],
     [''],
+    ['IF THE SHEET SAYS IT HAS RUN OUT OF ROOM'],
+    ['- Google limits how big one spreadsheet can get, counting every cell in every tab whether there is anything in it or not.'],
+    ['- Each product tab is made only as big as that product needs, and trimmed back down as it shrinks, so a Push claims as little of that room as it can.'],
+    ['- Tabs of your own count too. Delete any you have finished with, or create a fresh sheet from the settings page, and push again.'],
+    [''],
     ['IF IT STOPS WORKING AFTER ABOUT A WEEK'],
     ['- Your Google consent screen is probably still in "Testing" mode, which expires access after 7 days.'],
     ['- Publish it to "In production" (one button, no review needed) and reconnect on the settings tab.'],
   ]
 }
 
+// How far across the starting column widths are applied. Wide enough to cover
+// the Products tab's own columns; clamped to the tab's actual width by every
+// caller, because a dimension request that runs past the last column GROWS the
+// tab to reach it - which is how every product tab ended up 45 columns wide
+// holding twenty, and how a workbook of a few hundred tabs reached Google's
+// ten-million-cell ceiling (see lib/capacity.ts).
+const WIDTH_COLUMNS = 45
+
 // Freeze, bold and protect the header row of one tab, and give its columns a
 // sensible starting width. Sheet/cell properties, so they outlive every value
-// rewrite a Push does - Push never needs to re-format.
-function headerFormattingRequests(sheetId: number, protectionNote: string): unknown[] {
+// rewrite a Push does - Push never needs to re-format. `columnCount` is the tab's
+// own width, which the width request is never allowed to exceed.
+function headerFormattingRequests(sheetId: number, protectionNote: string, columnCount: number): unknown[] {
   return [
     // Freeze the header row.
     {
@@ -134,7 +149,7 @@ function headerFormattingRequests(sheetId: number, protectionNote: string): unkn
     // Sensible starting column widths across the used range (harmless on unused).
     {
       updateDimensionProperties: {
-        range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 45 },
+        range: { sheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: Math.min(WIDTH_COLUMNS, Math.max(1, columnCount)) },
         properties: { pixelSize: 160 },
         fields: 'pixelSize',
       },
@@ -157,7 +172,9 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
     const sheetId = created.sheetIds[tab]
     if (sheetId === undefined) continue
     const note = tab === TAB.SUPPLIERS ? REFERENCE_HEADER_NOTE : SYNCED_HEADER_NOTE
-    requests.push(...headerFormattingRequests(sheetId, note))
+    // A tab created by spreadsheets.create gets Google's default 26 columns; the
+    // Push widens it to whatever the catalogue needs on the way in.
+    requests.push(...headerFormattingRequests(sheetId, note, MIN_COLUMNS))
   }
   await batchUpdate(created.spreadsheetId, requests)
 
@@ -173,7 +190,7 @@ export async function ensureVariationTab(spreadsheetId: string, title: string): 
   // index to the end, and existing tabs shift right harmlessly.
   const sheetId = await addTab(spreadsheetId, title, 1)
   if (sheetId === null) return false // already there
-  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE))
+  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE, MIN_COLUMNS))
   return true
 }
 
@@ -185,26 +202,38 @@ export async function ensureVariationTab(spreadsheetId: string, title: string): 
 // in the same call reference the new sheet before Google has named one.
 // batchUpdate is atomic, so a failure creates nothing rather than half the tabs.
 // Returns the id assigned to each title.
+//
+// Each tab is created at the SIZE IT NEEDS, plus a little slack (see
+// lib/capacity.ts). An addSheet with no gridProperties gets Google's default 1000
+// rows, so a product with forty variants used to be handed a grid twenty-five
+// times bigger than its contents - and Google counts every blank cell of it
+// against the workbook's ten-million-cell ceiling. A few hundred product tabs is
+// enough to reach that ceiling, at which point the Push stops mid-batch with
+// "This action would increase the number of cells in the workbook above the
+// limit". The tab still grows on demand: a Push that writes past the last row
+// widens the grid itself.
 export async function createVariationTabsBatch(
   spreadsheetId: string,
-  titles: string[],
+  tabs: PlannedTab[],
   existingIds: Iterable<number>,
 ): Promise<Record<string, number>> {
   const assigned: Record<string, number> = {}
-  if (titles.length === 0) return assigned
+  if (tabs.length === 0) return assigned
   const taken = new Set<number>(existingIds)
   // Sequential from just past the largest known id - well inside int32, and
   // collision-free against everything the caller can see.
   let next = Math.max(0, ...taken) + 1
   const requests: unknown[] = []
-  for (const title of titles) {
+  for (const tab of tabs) {
     while (taken.has(next)) next++
     const sheetId = next
     taken.add(sheetId)
-    assigned[title] = sheetId
+    assigned[tab.title] = sheetId
+    const rowCount = targetRows(tab.rows)
+    const columnCount = targetColumns(tab.columns)
     // Slot new product tabs right after Products, same as ensureVariationTab.
-    requests.push({ addSheet: { properties: { sheetId, title, index: 1 } } })
-    requests.push(...headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE))
+    requests.push({ addSheet: { properties: { sheetId, title: tab.title, index: 1, gridProperties: { rowCount, columnCount } } } })
+    requests.push(...headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE, columnCount))
   }
   await batchUpdate(spreadsheetId, requests)
   return assigned
@@ -239,7 +268,7 @@ export async function ensureSuppliersTab(spreadsheetId: string): Promise<void> {
   // original three tabs; Google clamps an out-of-range index to the end.
   const sheetId = await addTab(spreadsheetId, TAB.SUPPLIERS, 2)
   if (sheetId === null) return
-  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, REFERENCE_HEADER_NOTE))
+  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, REFERENCE_HEADER_NOTE, MIN_COLUMNS))
 }
 
 // The in-sheet dropdowns that stop the typo class the import would reject anyway,
@@ -267,12 +296,18 @@ const VALIDATION_LISTS: Record<string, string[]> = {
  * clear covers the pushed columns only; the owner's own columns to the right,
  * and any validation they have put on them, are never touched.
  */
-export function productsValidationRequests(sheetId: number, columns: string[]): unknown[] {
+// How far down the dropdowns reach when the caller does not say. A range that
+// runs past the last row GROWS the tab to reach it, so a caller that knows the
+// tab's height passes it and the rules stop there.
+export const VALIDATION_ROWS = 5000
+
+export function productsValidationRequests(sheetId: number, columns: string[], rows: number = VALIDATION_ROWS): unknown[] {
   if (columns.length === 0) return []
+  const endRowIndex = Math.max(2, rows)
   const requests: unknown[] = [
     {
       setDataValidation: {
-        range: { sheetId, startRowIndex: 1, endRowIndex: 5000, startColumnIndex: 0, endColumnIndex: columns.length },
+        range: { sheetId, startRowIndex: 1, endRowIndex, startColumnIndex: 0, endColumnIndex: columns.length },
       },
     },
   ]
@@ -281,7 +316,7 @@ export function productsValidationRequests(sheetId: number, columns: string[]): 
     if (colIndex < 0) continue
     requests.push({
       setDataValidation: {
-        range: { sheetId, startRowIndex: 1, endRowIndex: 5000, startColumnIndex: colIndex, endColumnIndex: colIndex + 1 },
+        range: { sheetId, startRowIndex: 1, endRowIndex, startColumnIndex: colIndex, endColumnIndex: colIndex + 1 },
         rule: {
           condition: { type: 'ONE_OF_LIST', values: values.map((v) => ({ userEnteredValue: v })) },
           showCustomUi: true,
@@ -293,9 +328,13 @@ export function productsValidationRequests(sheetId: number, columns: string[]): 
   return requests
 }
 
+// The dropdowns stop at the Products tab's own last row rather than a fixed
+// 5,000: a validation range past the end of the grid makes Google grow the tab to
+// meet it, which on a small catalogue is thousands of blank cells charged against
+// the workbook's ceiling, and on a big one undoes the trim the Push just did.
 export async function applyProductsValidation(spreadsheetId: string, columns: string[]): Promise<void> {
-  const sheetIds = await getSheetIds(spreadsheetId)
-  const sheetId = sheetIds[TAB.PRODUCTS]
-  if (sheetId === undefined) return
-  await batchUpdate(spreadsheetId, productsValidationRequests(sheetId, columns))
+  const grids = await getSheetGrids(spreadsheetId)
+  const grid = grids[TAB.PRODUCTS]
+  if (grid === undefined) return
+  await batchUpdate(spreadsheetId, productsValidationRequests(grid.sheetId, columns, grid.rowCount))
 }

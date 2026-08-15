@@ -5,11 +5,12 @@ import {
   writeRawCells,
   writeFormulaRuns,
   batchUpdate,
-  getSheetIds,
+  getSheetGrids,
   columnLetter,
   type CellValue,
   type SheetCell,
 } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { targetRows, targetColumns } from '@/modules/google-sheet-products-for-shop/lib/capacity'
 import {
   orderColumnsLikeSheet,
   orderRowsLikeSheet,
@@ -218,6 +219,57 @@ export function planTabPush(input: TabPushInput, oldGridIn: SheetCell[][]): TabP
   return { tab, insert, doomedRows, grid, preserved, clears, skip }
 }
 
+/**
+ * Trim each pushed tab down to the grid it actually uses.
+ *
+ * Google counts a workbook's cells across every tab whether anything is in them
+ * or not, and caps the lot at ten million. A tab created at the default 1000 rows
+ * by 45 columns to hold forty variants is 44,000 blank cells, and a few hundred
+ * of those is a workbook that refuses to grow another tab (see lib/capacity.ts).
+ *
+ * This is the one place that can trim safely, because the batched pre-read has
+ * just returned each tab's REAL used extent - the owner's own columns and rows
+ * included, since values.get returns everything anyone has put in the tab, not
+ * only what this module wrote. The target is that extent plus slack.
+ *
+ * Shrink only. Growing is left to the write itself, which extends a tab as
+ * needed; a resize that grew a tab could only ever undo the point of the pass.
+ * The current size accounts for the inserts and deletes queued ahead of it in the
+ * same batch, because those have not been applied when `grids` was read.
+ */
+export function resizeRequests(
+  plans: TabPushPlan[],
+  oldGrids: Record<string, SheetCell[][]>,
+  grids: Record<string, { sheetId: number; rowCount: number; columnCount: number }>,
+): unknown[] {
+  const requests: unknown[] = []
+  for (const plan of plans) {
+    const grid = grids[plan.tab]
+    if (grid === undefined) continue
+    const old = oldGrids[plan.tab] ?? []
+    const oldWidth = old.reduce((m, row) => Math.max(m, row.length), 0)
+
+    const usedRows = Math.max(plan.grid.length, old.length - plan.doomedRows.length)
+    const usedColumns = Math.max(plan.grid[0]?.length ?? 0, oldWidth + (plan.insert?.count ?? 0))
+
+    const currentRows = grid.rowCount - plan.doomedRows.length
+    const currentColumns = grid.columnCount + (plan.insert?.count ?? 0)
+
+    const rowCount = targetRows(usedRows)
+    const columnCount = targetColumns(usedColumns)
+    const fields: string[] = []
+    const gridProperties: { rowCount?: number; columnCount?: number } = {}
+    if (rowCount < currentRows) { gridProperties.rowCount = rowCount; fields.push('gridProperties.rowCount') }
+    if (columnCount < currentColumns) { gridProperties.columnCount = columnCount; fields.push('gridProperties.columnCount') }
+    if (fields.length === 0) continue
+
+    requests.push({
+      updateSheetProperties: { properties: { sheetId: grid.sheetId, gridProperties }, fields: fields.join(',') },
+    })
+  }
+  return requests
+}
+
 // Push many tabs in one batched pass. Results come back in input order. Safe to
 // re-run in full: every step re-reads the sheet fresh and re-plans, so a re-run
 // after a crash just re-writes the same cells (or skips them).
@@ -235,31 +287,31 @@ export async function pushGrids(spreadsheetId: string, inputs: TabPushInput[]): 
 
   // Structural changes for every tab in one atomic batchUpdate: each tab's
   // column insert first, then its row deletes bottom-up (so no delete shifts the
-  // indices of one still to apply). Different tabs are independent sheets, so
-  // interleaving order between tabs does not matter. A tab whose sheetId cannot
-  // be found (renamed mid-push) skips its structural work, exactly as the
-  // single-tab path did - the value write below still lands.
+  // indices of one still to apply), then the resize that trims whatever blank
+  // grid is left over. Different tabs are independent sheets, so interleaving
+  // order between tabs does not matter. A tab whose sheetId cannot be found
+  // (renamed mid-push) skips its structural work, exactly as the single-tab path
+  // did - the value write below still lands.
   const structural = plans.filter((p) => p.insert !== null || p.doomedRows.length > 0)
-  if (structural.length > 0) {
-    const ids = await getSheetIds(spreadsheetId)
-    const requests: unknown[] = []
-    for (const plan of structural) {
-      const sheetId = ids[plan.tab]
-      if (sheetId === undefined) continue
-      if (plan.insert) {
-        requests.push({
-          insertDimension: {
-            range: { sheetId, dimension: 'COLUMNS', startIndex: plan.insert.at, endIndex: plan.insert.at + plan.insert.count },
-            inheritFromBefore: false,
-          },
-        })
-      }
-      for (const range of toDescendingRowRanges(plan.doomedRows)) {
-        requests.push({ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: range.start, endIndex: range.end } } })
-      }
+  const grids = await getSheetGrids(spreadsheetId)
+  const requests: unknown[] = []
+  for (const plan of structural) {
+    const sheetId = grids[plan.tab]?.sheetId
+    if (sheetId === undefined) continue
+    if (plan.insert) {
+      requests.push({
+        insertDimension: {
+          range: { sheetId, dimension: 'COLUMNS', startIndex: plan.insert.at, endIndex: plan.insert.at + plan.insert.count },
+          inheritFromBefore: false,
+        },
+      })
     }
-    await batchUpdate(spreadsheetId, requests)
+    for (const range of toDescendingRowRanges(plan.doomedRows)) {
+      requests.push({ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: range.start, endIndex: range.end } } })
+    }
   }
+  requests.push(...resizeRequests(plans, oldGrids, grids))
+  await batchUpdate(spreadsheetId, requests)
 
   const active = plans.filter((p) => !p.skip)
 

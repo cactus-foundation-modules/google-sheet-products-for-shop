@@ -3,7 +3,10 @@ import { pushProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/p
 import { pushVariationTabsBatch } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
 import { pushSuppliersTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
 import { createVariationTabsBatch } from '@/modules/google-sheet-products-for-shop/lib/workbook'
-import { getSheetIds, deleteSheets, readHeaderRows, getSheetModifiedTime } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { getSheetIds, getSheetGrids, deleteSheets, readHeaderRows, getSheetModifiedTime, batchUpdate } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import {
+  planCapacity, reclaimRowTarget, workbookFullMessage, targetRows, targetColumns, type PlannedTab,
+} from '@/modules/google-sheet-products-for-shop/lib/capacity'
 import { RESERVED_TAB_TITLES, isVariationTab } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { getConnection, stampLastPush, stampLastPushAttempt, setVariationTabManifest } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { gridHash } from '@/modules/google-sheet-products-for-shop/lib/grid-hash'
@@ -57,6 +60,19 @@ export function pushStatus(job: PushJob): PushStatus {
     },
     error: job.error,
   }
+}
+
+// A product tab and the grid it has to hold, for the sizing and capacity maths.
+// The header row counts: it is a row of the tab like any other.
+function plannedTab(tab: PushVariationTab): PlannedTab {
+  return { title: tab.title, rows: tab.grid.length, columns: tab.grid[0]?.length ?? 0 }
+}
+
+// First tab per title. Titles are already unique across a Push (productTabTitle
+// guarantees it), so this only ever guards against a repeat within one group.
+function dedupeByTitle(tabs: PushVariationTab[]): PushVariationTab[] {
+  const seen = new Set<string>()
+  return tabs.filter((t) => (seen.has(t.title) ? false : (seen.add(t.title), true)))
 }
 
 // Delete the variation tabs that belong to no current product: a product that
@@ -116,8 +132,12 @@ async function runPushStep(job: PushJob): Promise<void> {
       if (!job.variationTabs) throw new Error('Push job is missing its variations snapshot.')
       const tabs = job.variationTabs
       // One sheet-list read up front so an already-present tab costs no per-tab
-      // existence check; only genuinely new tabs are created.
-      const existing = await getSheetIds(spreadsheetId)
+      // existence check; only genuinely new tabs are created. The same read
+      // carries each tab's grid size, which is what the capacity check below
+      // needs - Google counts a workbook's blank cells as well as its full ones.
+      const grids = await getSheetGrids(spreadsheetId)
+      const existing: Record<string, number> = {}
+      for (const [title, grid] of Object.entries(grids)) existing[title] = grid.sheetId
 
       // The fingerprint short-cut: a tab can be skipped WITHOUT EVEN A READ when
       // (a) the last successful Push recorded a hash for this slug under this
@@ -159,11 +179,38 @@ async function runPushStep(job: PushJob): Promise<void> {
         for (const t of group) (skippable(t) ? skipped : toPush).push(t)
 
         if (toPush.length > 0) {
-          // Create every missing tab of the group in one call, formatting and all.
-          const missing = [...new Set(toPush.filter((t) => existing[t.title] === undefined).map((t) => t.title))]
+          // Create every missing tab of the group in one call, formatting and all,
+          // each at the size it needs rather than Google's blank 1000-row default.
+          const missing = dedupeByTitle(toPush.filter((t) => existing[t.title] === undefined))
           if (missing.length > 0) {
-            const assigned = await createVariationTabsBatch(spreadsheetId, missing, Object.values(existing))
-            for (const [title, id] of Object.entries(assigned)) existing[title] = id
+            // Will the whole phase's new tabs fit? Judged against every tab still
+            // to be created, not just this group's, so a workbook that is going to
+            // run out says so before it has half-built the catalogue. A workbook
+            // with room spends nothing here; one without gets its blank rows back
+            // first (see planCapacity) and only then gives up.
+            const plan = planCapacity({
+              grids,
+              existing: tabs.filter((t) => grids[t.title] !== undefined).map((t) => ({ title: t.title, rows: t.grid.length })),
+              planned: tabs.filter((t) => existing[t.title] === undefined).map(plannedTab),
+            })
+            if (plan.requests.length > 0) {
+              await batchUpdate(spreadsheetId, plan.requests)
+              // Mirror the reclaim locally so the next group's projection is not
+              // still working off the sizes this step has just changed.
+              for (const t of tabs) {
+                const grid = grids[t.title]
+                if (grid) grid.rowCount = Math.min(grid.rowCount, reclaimRowTarget(t.grid.length))
+              }
+              await stampLastPushAttempt()
+            }
+            if (plan.overBudget) throw new Error(workbookFullMessage())
+
+            const assigned = await createVariationTabsBatch(spreadsheetId, missing.map(plannedTab), Object.values(existing))
+            for (const [title, id] of Object.entries(assigned)) {
+              existing[title] = id
+              const tab = missing.find((t) => t.title === title)
+              if (tab) grids[title] = { sheetId: id, rowCount: targetRows(tab.grid.length), columnCount: targetColumns(tab.grid[0]?.length ?? 0) }
+            }
           }
           const results = await pushVariationTabsBatch(spreadsheetId, toPush.map((t) => ({ title: t.title, grid: t.grid })))
           for (const res of results) {

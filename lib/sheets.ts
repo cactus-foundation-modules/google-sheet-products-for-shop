@@ -3,6 +3,7 @@ import {
   awaitSlot, sleep, shouldBackOff, backoffMs, MAX_BACKOFF_RETRIES,
 } from '@/modules/google-sheet-products-for-shop/lib/rate-limit'
 import { tabRange, batchGetGroups } from '@/modules/google-sheet-products-for-shop/lib/batch-ranges'
+import type { SheetGrid } from '@/modules/google-sheet-products-for-shop/lib/capacity'
 
 // Thin fetch wrapper over the five Sheets/Drive REST calls this module needs.
 // Deliberately no `googleapis` dependency: that package is enormous with a large
@@ -417,6 +418,29 @@ export async function getSheetIds(spreadsheetId: string): Promise<Record<string,
   const ids: Record<string, number> = {}
   for (const s of data.sheets ?? []) ids[s.properties.title] = s.properties.sheetId
   return ids
+}
+
+// Map of tab title -> sheetId AND grid size. The same call getSheetIds makes,
+// asking for two more fields: Google counts a workbook's cells across every tab
+// whether anything is in them or not, so anything that has to stay under that
+// ceiling needs the sizes, not just the ids (see lib/capacity.ts).
+export async function getSheetGrids(spreadsheetId: string): Promise<Record<string, SheetGrid>> {
+  const res = await ok(
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}?fields=sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))`, { method: 'GET' }),
+    'read spreadsheet'
+  )
+  const data = (await res.json()) as {
+    sheets?: Array<{ properties: { sheetId: number; title: string; gridProperties?: { rowCount?: number; columnCount?: number } } }>
+  }
+  const out: Record<string, SheetGrid> = {}
+  for (const s of data.sheets ?? []) {
+    out[s.properties.title] = {
+      sheetId: s.properties.sheetId,
+      rowCount: s.properties.gridProperties?.rowCount ?? 0,
+      columnCount: s.properties.gridProperties?.columnCount ?? 0,
+    }
+  }
+  return out
 }
 
 // Add one tab to an existing workbook and return its sheetId. Used for tabs
