@@ -29,13 +29,26 @@ export const WORKBOOK_CELL_LIMIT = 10_000_000
 export const CELL_BUDGET = 9_000_000
 
 // Room left on a tab beyond what the catalogue fills, so the owner can type a
-// few rows or add a column of their own without a Push having to grow the grid
-// first. Small enough that a few hundred tabs still cost a fraction of the
-// budget: a 60-variant product tab lands at 110 rows by 26 columns.
-export const ROW_SLACK = 50
-export const MIN_ROWS = 100
-export const COLUMN_SLACK = 5
-export const MIN_COLUMNS = 26
+// row or two without a Push having to grow the grid first.
+//
+// Kept DELIBERATELY tight. The first version of this left 50 spare rows and a
+// floor of 100, which is defensible arithmetic and reads, on the screen, as "it
+// is still making tabs full of blank cells" - because from the owner's side a
+// forty-row product on a hundred-row tab looks exactly like the fault we set out
+// to fix. Slack is not free comfort: it is the visible bottom half of every tab
+// they open. A tab that runs short costs nothing anyway - writing past the last
+// row grows the grid on its own - so the slack only has to cover typing by hand.
+//
+// A 60-variant product tab now lands at 81 rows by about 22 columns.
+export const ROW_SLACK = 20
+export const MIN_ROWS = 30
+export const COLUMN_SLACK = 2
+export const MIN_COLUMNS = 8
+
+// The width the three fixed tabs are born with, from spreadsheets.create. Not a
+// judgement about content - Google's own default, left alone so a brand-new
+// workbook looks like a spreadsheet rather than a slot.
+export const CREATED_TAB_COLUMNS = 26
 
 // One tab's grid dimensions, as spreadsheets.get reports them.
 export type SheetGrid = { sheetId: number; rowCount: number; columnCount: number }

@@ -443,6 +443,18 @@ export async function getSheetGrids(spreadsheetId: string): Promise<Record<strin
   return out
 }
 
+// Every tab as { sheetId, title }, IN THE ORDER THEY SIT along the bottom of the
+// workbook. getSheetIds hands back an object, which says nothing dependable about
+// order; anything arranging the tabs needs the sequence itself.
+export async function getSheetList(spreadsheetId: string): Promise<Array<{ sheetId: number; title: string }>> {
+  const res = await ok(
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}?fields=sheets.properties(sheetId,title)`, { method: 'GET' }),
+    'read spreadsheet'
+  )
+  const data = (await res.json()) as { sheets?: Array<{ properties: { sheetId: number; title: string } }> }
+  return (data.sheets ?? []).map((s) => ({ sheetId: s.properties.sheetId, title: s.properties.title }))
+}
+
 // Add one tab to an existing workbook and return its sheetId. Used for tabs
 // introduced after a workbook was created: every install made before the tab
 // existed still has to grow one, and nobody is going to recreate their sheet for

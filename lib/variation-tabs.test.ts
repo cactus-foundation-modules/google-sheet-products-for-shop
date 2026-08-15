@@ -26,8 +26,12 @@ const WIDE: string[][] = [
   WIDE_HEADER,
   ['desk', 'Oak Desk', 'Finish', 'Oak', 'Size', '1400', 'D-OAK-14', '299', '', '', '', '150', '5', '', 'Acme', '30', 'a.jpg', 'child-1', 'Solid oak'],
   ['desk', 'Oak Desk', 'Finish', 'Walnut', 'Size', '1600', 'D-WAL-16', '349', '', '', '', '175', '3', '', 'Acme', '32', 'b.jpg', 'child-2', 'Solid walnut'],
-  ['stool', 'Bar Stool', 'Colour', 'Red', '', '', 'S-RED', '49', '', '', '', '', '20', '', 'Acme', '5', 'c.jpg', 'child-3', ''],
+  ['stool', 'Bar Stool', 'Colour', 'Red', '', '', 'S-RED', '49', '', '', '', '25', '20', '', 'Acme', '5', 'c.jpg', 'child-3', ''],
 ]
+
+// Columns of WIDE that no variant has a value in: Sale Price, RRP, Trade Price
+// and Barcode. A product tab leaves those off entirely (see ALWAYS_COLUMNS).
+const BLANK_THROUGHOUT = ['Sale Price', 'RRP', 'Trade Price', 'Barcode']
 
 describe('productTabTitle', () => {
   it('uses the product name, cleaning forbidden characters', () => {
@@ -97,12 +101,43 @@ describe('splitWideGridByProduct', () => {
     expect(tabs[1]!.grid[0]!).not.toContain('Material')
   })
 
-  it('keeps all fixed columns on every tab', () => {
+  it('keeps every fixed column the product actually uses', () => {
     for (const t of tabs) {
       for (const col of ['Variant SKU', 'Price', 'Cost Price', 'Stock', 'Variant ID']) {
         expect(t.grid[0]!).toContain(col)
       }
     }
+  })
+
+  it('leaves off a fixed column no variant of that product has a value in', () => {
+    // A chair with no sale price does not need a Sale Price column. Typing the
+    // heading back is what turns one on - see ALWAYS_COLUMNS.
+    for (const t of tabs) {
+      for (const col of BLANK_THROUGHOUT) expect(t.grid[0]!).not.toContain(col)
+    }
+  })
+
+  it('keeps the identifying columns and the price even when blank', () => {
+    // Without Variant SKU and Variant ID a Pull cannot tell which variant a row
+    // is, so those two are never dropped however empty they look.
+    const blankIds: string[][] = [
+      ['Parent Slug', 'Parent Name', 'Option 1', 'Value 1', 'Variant SKU', 'Price', 'Cost Price', 'Variant ID'],
+      ['new', 'New Thing', 'Colour', 'Red', '', '', '', ''],
+    ]
+    const header = splitWideGridByProduct(blankIds)[0]!.grid[0]!
+    expect(header).toContain('Variant SKU')
+    expect(header).toContain('Variant ID')
+    expect(header).toContain('Price')
+    expect(header).not.toContain('Cost Price')
+  })
+
+  it('keeps a column one variant uses even when the others leave it blank', () => {
+    const partial: string[][] = [
+      ['Parent Slug', 'Parent Name', 'Option 1', 'Value 1', 'Variant SKU', 'Price', 'Variant ID', 'Sale Price'],
+      ['desk', 'Desk', 'Finish', 'Oak', 'D-1', '299', 'c1', ''],
+      ['desk', 'Desk', 'Finish', 'Walnut', 'D-2', '349', 'c2', '299'],
+    ]
+    expect(splitWideGridByProduct(partial)[0]!.grid[0]!).toContain('Sale Price')
   })
 
   it('drops a switched-off fixed column from every tab, keeping the rest', () => {
@@ -153,8 +188,13 @@ describe('mergeVariationTabs', () => {
     const merged = mergeVariationTabs(tabs)
     const mh = merged[0]!
     const wh = WIDE[0]!
-    // Every original column is present in the merged header.
-    for (const col of wh) expect(mh).toContain(col)
+    // Every original column that carries a value somewhere survives the round
+    // trip; one that is blank all the way down is deliberately dropped, and
+    // there is nothing in it to lose.
+    for (const col of wh) {
+      if (BLANK_THROUGHOUT.includes(col)) expect(mh, col).not.toContain(col)
+      else expect(mh, col).toContain(col)
+    }
     // Every data row matches cell-for-cell, looked up by column name.
     for (let r = 1; r < WIDE.length; r++) {
       const orig = WIDE[r]!
@@ -163,6 +203,7 @@ describe('mergeVariationTabs', () => {
       const mrow = merged.find((row) => row[mh.indexOf('Variant ID')] === variantId)!
       expect(mrow, `row for ${slug}/${variantId}`).toBeTruthy()
       for (const col of wh) {
+        if (BLANK_THROUGHOUT.includes(col)) continue
         expect(mrow[mh.indexOf(col)], `${slug} ${col}`).toBe(orig[wh.indexOf(col)])
       }
     }

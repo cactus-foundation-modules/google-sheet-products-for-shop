@@ -1,5 +1,6 @@
-import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, getSheetGrids, addTab } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { targetRows, targetColumns, MIN_COLUMNS, type PlannedTab } from '@/modules/google-sheet-products-for-shop/lib/capacity'
+import { createSpreadsheet, writeGrid, batchUpdate, getSheetIds, getSheetGrids, getSheetList, addTab } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { desiredTabOrder, sameOrder, reorderRequests } from '@/modules/google-sheet-products-for-shop/lib/tab-order'
+import { targetRows, targetColumns, CREATED_TAB_COLUMNS, type PlannedTab } from '@/modules/google-sheet-products-for-shop/lib/capacity'
 
 // The fixed tabs, in order. Variations no longer has a single fixed tab: every
 // variable product gets its OWN tab (created on Push, see ensureVariationTab),
@@ -38,8 +39,11 @@ function readmeRows(): string[][] {
     [''],
     ['THE PRODUCT TABS'],
     ['- The Products tab lists every product. Each product that has variations also gets its own tab, named after it.'],
-    ['- A product\'s tab shows only the options that product actually uses, so you are never staring at blank columns meant for some other product.'],
+    ['- A product\'s tab shows only the options and columns that product actually uses, so you are never staring at blank columns meant for some other product.'],
+    ['- A column with nothing in it for any of that product\'s variations is left off - a chair with no sale price gets no Sale Price column. The SKU, Variant ID and Price columns are always there.'],
+    ['- To start using one that is not there, type its heading into the first empty column, fill in your values and Pull. The column is read by its heading, so that is all it takes - and the next Push keeps it, now that something is in it.'],
     ['- Do not rename or delete a product tab by hand. A Pull needs to find it; if it has gone, the Pull stops and asks you to Push again rather than risk removing those variants.'],
+    ['- The tabs are kept in order for you: Products, Suppliers and this one first, then every product A to Z, then any tabs of your own. A Push puts them back in that order, so a new product lands in its right place rather than on the end.'],
     [''],
     ['THE SUPPLIERS TAB'],
     ['- A read-only list of your suppliers, their discount and the catalogues you have recorded against each one, refreshed on every Push.'],
@@ -174,7 +178,7 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
     const note = tab === TAB.SUPPLIERS ? REFERENCE_HEADER_NOTE : SYNCED_HEADER_NOTE
     // A tab created by spreadsheets.create gets Google's default 26 columns; the
     // Push widens it to whatever the catalogue needs on the way in.
-    requests.push(...headerFormattingRequests(sheetId, note, MIN_COLUMNS))
+    requests.push(...headerFormattingRequests(sheetId, note, CREATED_TAB_COLUMNS))
   }
   await batchUpdate(created.spreadsheetId, requests)
 
@@ -190,7 +194,7 @@ export async function ensureVariationTab(spreadsheetId: string, title: string): 
   // index to the end, and existing tabs shift right harmlessly.
   const sheetId = await addTab(spreadsheetId, title, 1)
   if (sheetId === null) return false // already there
-  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE, MIN_COLUMNS))
+  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE, CREATED_TAB_COLUMNS))
   return true
 }
 
@@ -231,12 +235,35 @@ export async function createVariationTabsBatch(
     assigned[tab.title] = sheetId
     const rowCount = targetRows(tab.rows)
     const columnCount = targetColumns(tab.columns)
-    // Slot new product tabs right after Products, same as ensureVariationTab.
-    requests.push({ addSheet: { properties: { sheetId, title: tab.title, index: 1, gridProperties: { rowCount, columnCount } } } })
+    // No index: a new tab is appended, and the CLEANUP phase puts every tab in
+    // its place afterwards (see orderTabs). Slotting each new one at index 1, as
+    // this used to, left a freshly built workbook in reverse order of creation
+    // with Suppliers and Read me shunted to the far end.
+    requests.push({ addSheet: { properties: { sheetId, title: tab.title, gridProperties: { rowCount, columnCount } } } })
     requests.push(...headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE, columnCount))
   }
   await batchUpdate(spreadsheetId, requests)
   return assigned
+}
+
+/**
+ * Put the tabs in order: Products, Suppliers, Read me, then every product tab
+ * A-Z, then anything the owner has added themselves.
+ *
+ * Run at the end of a Push, once the orphan sweep has been and gone, so nothing
+ * about to be deleted is carefully filed first. A workbook already in order
+ * costs one read and no write at all, which is every Push after the first.
+ *
+ * The owner's own tabs end up after the product tabs rather than wherever they
+ * were - unavoidable, since the product tabs have to be contiguous from position
+ * three - but they keep their order relative to each other.
+ */
+export async function orderTabs(spreadsheetId: string, variationTitles: ReadonlySet<string>): Promise<void> {
+  const list = await getSheetList(spreadsheetId)
+  const current = list.map((s) => s.title)
+  const desired = desiredTabOrder(current, variationTitles, TAB_ORDER)
+  if (sameOrder(current, desired)) return
+  await batchUpdate(spreadsheetId, reorderRequests(desired, new Map(list.map((s) => [s.title, s.sheetId]))))
 }
 
 /**
@@ -268,7 +295,7 @@ export async function ensureSuppliersTab(spreadsheetId: string): Promise<void> {
   // original three tabs; Google clamps an out-of-range index to the end.
   const sheetId = await addTab(spreadsheetId, TAB.SUPPLIERS, 2)
   if (sheetId === null) return
-  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, REFERENCE_HEADER_NOTE, MIN_COLUMNS))
+  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, REFERENCE_HEADER_NOTE, CREATED_TAB_COLUMNS))
 }
 
 // The in-sheet dropdowns that stop the typo class the import would reject anyway,

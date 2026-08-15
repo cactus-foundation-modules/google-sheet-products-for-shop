@@ -43,16 +43,16 @@ function plan(over: Partial<TabPushPlan> & { tab: string }): TabPushPlan {
 
 describe('tab sizing', () => {
   it('gives a tab room to grow without handing it Google\'s blank default', () => {
-    // A 40-variant product: 41 rows of content, not 1000. Under the floor, so it
-    // gets the floor rather than the slack.
-    expect(targetRows(41)).toBe(MIN_ROWS)
-    expect(targetRows(200)).toBe(250)
-    expect(targetColumns(20)).toBe(MIN_COLUMNS)
+    // A 40-variant product: 41 rows of content, not 1000, and a screenful of
+    // blank underneath rather than nine hundred rows of it.
+    expect(targetRows(41)).toBe(61)
+    expect(targetColumns(20)).toBe(22)
     // A tiny tab still gets a usable floor.
     expect(targetRows(2)).toBe(MIN_ROWS)
+    expect(targetColumns(1)).toBe(MIN_COLUMNS)
     // A big one is sized to fit, not to a fixed cap.
-    expect(targetRows(21_400)).toBe(21_450)
-    expect(targetColumns(45)).toBe(50)
+    expect(targetRows(21_400)).toBe(21_420)
+    expect(targetColumns(45)).toBe(47)
   })
 
   it('costs a fraction of what Google\'s default costs', () => {
@@ -176,9 +176,13 @@ describe('resizeRequests', () => {
     })]
     const old: Record<string, SheetCell[][]> = { Alpha: Array.from({ length: 71 }, () => row(20)) }
     const requests = resizeRequests(plans, old, { Alpha: grid(7, 120, 24) }) as ResizeRequest[]
-    // Rows: 120 - 30 = 90 after the deletes, target 41 + slack = 91, so no shrink.
-    // Columns: 24 + 4 = 28 after the insert, used 24, target 29 - no shrink either.
-    expect(requests).toEqual([])
+    // Used rows are 41 once the 30 doomed ones have gone, so the target is 61 -
+    // a shrink against the 90 rows that will be left, which is the figure that
+    // matters rather than the 120 the size was read at.
+    // Columns are the discriminating half: the insert takes the tab to 28, so
+    // the target of 26 IS a shrink. Ignore the queued insert and you read the
+    // width as 24, conclude there is nothing to do, and leave the tab wide.
+    expect(requests[0]!.updateSheetProperties.properties.gridProperties).toEqual({ rowCount: 61, columnCount: 26 })
   })
 
   it('leaves a tab alone when the sheet no longer has it', () => {

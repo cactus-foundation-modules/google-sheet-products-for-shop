@@ -28,6 +28,21 @@ const FIXED_MIDDLE_COLUMNS = [
 ] as const
 const OPTION_PAIR = /^(Option|Value) \d+$/
 
+// The fixed columns that are written even when every variant leaves them blank.
+// Two of them identify a row (which is how a Pull knows which variant it is
+// looking at) and the third is the price, whose absence is a fact worth seeing.
+// Every OTHER fixed column is left off a product's tab when no variant of that
+// product has a value in it: a chair with no sale price does not need a Sale
+// Price column any more than it needs an option it does not use.
+//
+// Leaving one off does not take the field away. A Pull reads the columns it
+// FINDS, by name - so typing the heading back in a spare column and filling it
+// in is all it takes to set that field, and the next Push keeps the column now
+// that something is in it. mergeVariationTabs already works this way for a
+// column an owner deleted by hand; this simply stops us writing the blank one in
+// the first place.
+const ALWAYS_COLUMNS: ReadonlySet<string> = new Set(['Variant SKU', 'Variant ID', 'Price'])
+
 const SLUG_HEADER = 'Parent Slug'
 const NAME_HEADER = 'Parent Name'
 
@@ -188,10 +203,16 @@ export function splitWideGridByProduct(wide: CellValue[][], excludedColumns: rea
     // Which extra field columns this product has any value in.
     const keptFields = layout.fields.filter((f) => rows.some((row) => nonEmpty(cell(row, f.index))))
 
+    // And which fixed columns it has any value in - the same test, so a product
+    // tab carries only the columns that product actually uses (see ALWAYS_COLUMNS).
+    const keptFixed = fixedColumns.filter((col) =>
+      ALWAYS_COLUMNS.has(col) || rows.some((row) => nonEmpty(cell(row, layout.fixed.get(col) ?? -1)))
+    )
+
     const narrowHeader: string[] = [
       SLUG_HEADER, NAME_HEADER,
       ...optionPairHeaders(usedOptions),
-      ...fixedColumns,
+      ...keptFixed,
       ...keptFields.map((f) => f.label),
     ]
     const grid: CellValue[][] = [narrowHeader]
@@ -200,7 +221,7 @@ export function splitWideGridByProduct(wide: CellValue[][], excludedColumns: rea
       for (let i = 1; i <= usedOptions; i++) {
         out.push(cell(row, header.indexOf(`Option ${i}`)), cell(row, header.indexOf(`Value ${i}`)))
       }
-      for (const col of fixedColumns) out.push(cell(row, layout.fixed.get(col) ?? -1))
+      for (const col of keptFixed) out.push(cell(row, layout.fixed.get(col) ?? -1))
       for (const f of keptFields) out.push(cell(row, f.index))
       grid.push(out)
     }

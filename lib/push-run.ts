@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db/prisma'
 import { pushProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/push-products'
 import { pushVariationTabsBatch } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
 import { pushSuppliersTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
-import { createVariationTabsBatch } from '@/modules/google-sheet-products-for-shop/lib/workbook'
+import { createVariationTabsBatch, orderTabs } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { getSheetIds, getSheetGrids, deleteSheets, readHeaderRows, getSheetModifiedTime, batchUpdate } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import {
   planCapacity, reclaimRowTarget, workbookFullMessage, targetRows, targetColumns, type PlannedTab,
@@ -236,7 +236,11 @@ async function runPushStep(job: PushJob): Promise<void> {
       // Reference tab (written last: nobody's dependency), orphan-tab sweep,
       // manifest, deletion baseline. All bounded single operations.
       const suppliers = await pushSuppliersTab(spreadsheetId)
-      await deleteOrphanVariationTabs(spreadsheetId, new Set(job.writtenTitles ?? []))
+      const written = new Set(job.writtenTitles ?? [])
+      await deleteOrphanVariationTabs(spreadsheetId, written)
+      // Tabs into order last, after the sweep, so nothing due for deletion is
+      // filed neatly first. A workbook already in order costs no write.
+      await orderTabs(spreadsheetId, written)
       // Manifest entries carry each pushed grid's fingerprint so the NEXT Push
       // can skip tabs whose content has not moved (see the VARIATION_TABS phase).
       const manifest = (job.variationTabs ?? []).map((t) => ({ slug: t.slug, title: t.title, hash: gridHash(t.grid) }))
