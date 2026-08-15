@@ -4,46 +4,20 @@ import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
-import { readGrid, getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
-import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
-import { saveSheetSnapshot } from '@/modules/google-sheet-products-for-shop/lib/sheet-snapshot'
-import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
-import { buildPullPreview } from '@/modules/google-sheet-products-for-shop/lib/preview'
-import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
-import { CSV_COLUMNS } from '@/modules/shop/lib/csv'
+import { getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import {
+  createPreviewJob, getRunningPreviewJob, pruneOldPreviewJobs, expireStalePreviewJobs, PreviewAlreadyRunningError,
+} from '@/modules/google-sheet-products-for-shop/lib/preview-job'
+import { previewStatus } from '@/modules/google-sheet-products-for-shop/lib/preview-run'
 
-// TEMP DIAGNOSTIC (remove after the Markup/Range pull investigation): dumps, for
-// every Products row the live site just read, exactly what came back from the
-// sheet in the NON-fixed (attribute) columns - so we can see whether the owner's
-// new Markup/Range value actually reached the read the diff runs against. Fixed
-// shop columns are omitted to keep it small. Logged server-side AND returned on
-// the response under `debug`.
-function buildAttributeReadDebug(productsGrid: string[][]) {
-  const header = (productsGrid[0] ?? []).map((h) => h.trim())
-  const fixed = new Set<string>(CSV_COLUMNS)
-  const attrCols = header
-    .map((h, i) => ({ h, i }))
-    .filter(({ h }) => h !== '' && !fixed.has(h.toLowerCase().replace(/\s+/g, '_')))
-  const slugCol = header.findIndex((h) => h.toLowerCase() === 'slug')
-  const nameCol = header.findIndex((h) => h.toLowerCase() === 'name')
-  const rows: Array<{ row: number; slug: string; name: string; attrs: Record<string, string> }> = []
-  for (let r = 1; r < productsGrid.length; r++) {
-    const cells = productsGrid[r] ?? []
-    const attrs: Record<string, string> = {}
-    for (const { h, i } of attrCols) attrs[h] = (cells[i] ?? '').trim()
-    rows.push({
-      row: r + 1,
-      slug: slugCol >= 0 ? (cells[slugCol] ?? '').trim() : '',
-      name: nameCol >= 0 ? (cells[nameCol] ?? '').trim() : '',
-      attrs,
-    })
-  }
-  return { attributeColumns: attrCols.map((c) => c.h), rows }
-}
-
-// Reads both tabs, resolves them against the DB, returns a summary, writes
-// NOTHING. The confirm dialog lists exactly this before POST /pull runs it.
+// Start a check of the sheet: what would a Pull actually do? Nothing is written
+// to the catalogue at any point.
+//
+// This used to BE the check - one request that read the whole workbook and
+// compared it with the whole catalogue before it answered, which on a real
+// catalogue is minutes of work inside a route the platform kills at sixty
+// seconds. It now just creates the job (see migrations/012) and hands back an id;
+// the browser drives it a bounded step at a time and watches the progress.
 export async function POST() {
   const user = await getSessionFromCookie()
   if (!user) return errorResponse('Not authenticated', 401)
@@ -53,89 +27,37 @@ export async function POST() {
   if (!conn?.spreadsheetId) return errorResponse('Create the Google Sheet first.', 400)
 
   // Refuse while a Push is part-way through, before touching Google at all. A
-  // running push is spending the same sixty-reads-a-minute quota this preview
-  // needs, so the preview's reads queue behind it, blow the route's sixty-second
-  // ceiling, and the owner sees "could not read the sheet" about a sheet that is
-  // fine. It is also rewriting the very tabs the preview would read - a torn
-  // snapshot even when it does squeak in. Mirrors the guard Push has against a
-  // running Pull.
+  // running push is spending the same sixty-reads-a-minute quota this check
+  // needs, and it is rewriting the very tabs the check would read - a torn
+  // snapshot even when the reads do squeak in. Push has the mirror guard.
   if (await getLatestUnfinishedPushJob()) {
     return errorResponse('A push to the sheet is part-way through. Open Push and let it finish (or cancel it), then pull.', 409)
   }
+  // And a Pull already applying the sheet: checking it now would report against a
+  // catalogue that is changing under the check as it runs.
+  if (await getLatestUnfinishedPullJob()) {
+    return errorResponse('A pull is already in progress. Continue or cancel it first.', 409)
+  }
 
-  // Two failures with nothing in common: Google would not give us the grids, or
-  // the catalogue comparison behind them fell over. They were once caught
-  // together and both reported as "could not read the Google Sheet", which sent
-  // an owner off resetting a spreadsheet that was never the problem - a database
-  // blip mid-comparison read as a broken sheet. Caught separately, and each one
-  // says what actually happened.
-  let productsGrid: string[][]
-  let variationsGrid: string[][]
-  let modifiedAt: Date | null = null
+  // Retire anything left RUNNING by a browser that was closed mid-check, so the
+  // one-at-a-time index does not refuse this one on behalf of a ghost.
+  await expireStalePreviewJobs().catch(() => {})
+
+  // Two admin tabs, or a double-click, join the check already in flight rather
+  // than starting a second one against the same quota.
+  const running = await getRunningPreviewJob()
+  if (running) return NextResponse.json({ previewJobId: running.id, status: previewStatus(running), joined: true })
+
+  await pruneOldPreviewJobs().catch(() => {})
   try {
-    // modifiedTime is fetched BEFORE the grids: if the sheet is edited while the
-    // grids are being read, the stored time predates the edit, the Pull's own
-    // modifiedTime fetch sees a later instant, and the (possibly torn) snapshot
-    // is simply not reused. Fetched after, the race would run the other way -
-    // a snapshot of the old content filed under the new time.
-    modifiedAt = await getSheetModifiedTime(conn.spreadsheetId)
-    ;[productsGrid, variationsGrid] = await Promise.all([
-      readGrid(conn.spreadsheetId, TAB.PRODUCTS),
-      readMergedVariations(conn.spreadsheetId),
-    ])
+    const { id } = await createPreviewJob({ runBy: user.id })
+    return NextResponse.json({ previewJobId: id }, { status: 202 })
   } catch (err) {
-    if (err instanceof GoogleAuthError) return errorResponse(err.message, 400)
-    const reason = sheetFailureReason(err)
-    console.error('[google-sheet-products-for-shop/preview] sheet read failed:', reason)
-    return errorResponse(`Could not read the Google Sheet. ${reason}`, 502)
-  }
-
-  // Keep what was just read so a Pull started off this preview can skip the
-  // identical sweep (see lib/sheet-snapshot.ts). Best-effort: a failed save
-  // costs the Pull a re-read, never the preview.
-  if (modifiedAt !== null) {
-    await saveSheetSnapshot({ productsGrid, variationsGrid, driveModifiedTime: modifiedAt }).catch((err) => {
-      console.error('[google-sheet-products-for-shop/preview] snapshot save failed:', err)
-    })
-  }
-
-  // Same guard the Pull itself uses: a product tab renamed or deleted since the
-  // last Push would read as "these variants are gone". Refuse rather than preview a
-  // mass deletion the owner never intended.
-  const manifest = conn.variationTabManifest ?? []
-  if (manifest.length > 0) {
-    const present = slugsInMergedGrid(variationsGrid)
-    const missingSlugs = missingManifestSlugs(manifest.map((m) => m.slug), present)
-    if (missingSlugs.length > 0) {
-      const titles = manifest.filter((m) => missingSlugs.includes(m.slug)).map((m) => `"${m.title}"`)
-      return errorResponse(
-        `These product tabs are missing from your sheet: ${titles.join(', ')}. A tab has been renamed, deleted or emptied since your last Push. Restore it (or Push again) before pulling.`,
-        400,
-      )
+    if (err instanceof PreviewAlreadyRunningError) {
+      const again = await getRunningPreviewJob()
+      if (again) return NextResponse.json({ previewJobId: again.id, status: previewStatus(again), joined: true })
+      return errorResponse('A check of your sheet is already running.', 409)
     }
-  }
-
-  try {
-    const preview = await buildPullPreview(productsGrid, variationsGrid, conn)
-    // TEMP DIAGNOSTIC (remove after the Markup/Range pull investigation).
-    const debug = {
-      sheetRead: buildAttributeReadDebug(productsGrid),
-      // What the diff decided per product, so the sheet read above can be lined
-      // up against the update/unchanged verdict for the same row.
-      productVerdicts: [
-        ...preview.products.toUpdate.map((u) => ({
-          name: u.name,
-          kind: 'update' as const,
-          changes: u.changes.map((c) => `${c.field}: "${c.from}" -> "${c.to}"`),
-        })),
-        { note: `${preview.products.unchanged} product row(s) read as unchanged` },
-      ],
-    }
-    console.error('[gsp/preview][TEMP-DIAG]', JSON.stringify(debug))
-    return NextResponse.json({ preview, debug })
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : 'Unknown error'
-    console.error('[google-sheet-products-for-shop/preview] comparison failed:', reason)
-    return errorResponse(`Read the sheet fine, but comparing it with your catalogue failed: ${reason}`, 500)
+    throw err
   }
 }

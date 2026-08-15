@@ -29,6 +29,12 @@ function normaliseHeader(label: string): string {
   return label.trim().toLowerCase().replace(/\s+/g, '_')
 }
 
+// How many products are asked for their contributed columns at once. The
+// connection pool is shared with everything else the admin is doing, so this
+// stays modest; it is still the difference between a few seconds and a few
+// hundred round trips taken strictly one after the other.
+const PRODUCT_COLUMN_CONCURRENCY = 8
+
 // Cells go into the sheet as the type they actually are. Writing a price as the
 // string "100" makes a text cell, which Sheets shows as '100 and refuses to sum,
 // sort or chart - so numeric and boolean columns are converted, and everything
@@ -73,10 +79,26 @@ export async function buildProductsGrid(prefs: ColumnPrefs = DEFAULT_COLUMN_PREF
   const colsByProduct = new Map<string, Array<{ key: string; label: string }>>()
   const valuesByProduct = new Map<string, Record<string, string>>()
   if (providers.length > 0 && productIds.length > 0) {
+    // Which columns a product contributes is one database round trip per product
+    // per provider, and the answers do not depend on one another - so they are
+    // asked in batches rather than one product after another. Strictly serial,
+    // this single loop was the slowest thing in a Push on a real catalogue: a few
+    // hundred products at a round trip each, before a cell had been written.
+    // Batched, the whole pass is a few seconds. The results are still folded in
+    // catalogue order below, so the header's first-seen column order is unchanged.
+    const columnsById = new Map<string, Array<Array<{ key: string; label: string }>>>()
+    for (let i = 0; i < productIds.length; i += PRODUCT_COLUMN_CONCURRENCY) {
+      const batch = productIds.slice(i, i + PRODUCT_COLUMN_CONCURRENCY)
+      const answers = await Promise.all(batch.map(async (productId) =>
+        Promise.all(providers.map(({ provider }) => provider.listColumns(productId))),
+      ))
+      batch.forEach((productId, j) => columnsById.set(productId, answers[j] ?? []))
+    }
+
     for (const productId of productIds) {
       const cols: Array<{ key: string; label: string }> = []
-      for (const { provider } of providers) {
-        for (const c of await provider.listColumns(productId)) {
+      for (const perProvider of columnsById.get(productId) ?? []) {
+        for (const c of perProvider) {
           // Two providers (or two keys) can present the same visible label. A
           // sheet column is addressed by its label on the way back in (Pull hands
           // providers a row keyed by header text), so two same-labelled columns
@@ -101,8 +123,10 @@ export async function buildProductsGrid(prefs: ColumnPrefs = DEFAULT_COLUMN_PREF
       }
       colsByProduct.set(productId, cols)
     }
-    for (const { provider } of providers) {
-      const got = await provider.getValues(productIds)
+    // getValues takes the whole product list at once, so the providers only need
+    // to be asked alongside one another rather than in turn.
+    const valueSets = await Promise.all(providers.map(({ provider }) => provider.getValues(productIds)))
+    for (const got of valueSets) {
       for (const [productId, rec] of Object.entries(got)) {
         valuesByProduct.set(productId, { ...(valuesByProduct.get(productId) ?? {}), ...rec })
       }

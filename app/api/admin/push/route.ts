@@ -6,24 +6,26 @@ import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { createPushJob, getLatestUnfinishedPushJob, PushAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { pushStatus } from '@/modules/google-sheet-products-for-shop/lib/push-run'
-import { buildProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/push-products'
-import { buildVariationTabs } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
-import { columnPrefsFrom } from '@/modules/google-sheet-products-for-shop/lib/columns'
-import { productTabTitle, RESERVED_TAB_TITLES } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
+import { getRunningPreviewJob, expireStalePreviewJobs } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 import { getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
-import type { PushVariationTab } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // Only absorbs clock skew between Google's modifiedTime and the database clock; a
 // real owner edit lands minutes or hours after a sync, well beyond it. Matches the
 // old synchronous push. See the edit-guard note below.
 const SYNC_SKEW_MS = 120_000
 
-// Start a Push: snapshot the catalogue, then hand the browser a job id to step
-// through. Products are written before the product variation tabs (those tabs
-// reference product slugs), and the whole thing runs one bounded batch at a time
-// because a catalogue with dozens of variable products is dozens of tab writes -
-// far past what one 60s request can do. See migrations/007_push_job.sql.
+// Start a Push and hand the browser a job id to step through. Products are
+// written before the product variation tabs (those tabs reference product slugs),
+// and the whole thing runs one bounded batch at a time because a catalogue with
+// dozens of variable products is dozens of tab writes - far past what one 60s
+// request can do. See migrations/007_push_job.sql.
+//
+// This route no longer builds the catalogue snapshot itself. It used to, and on a
+// real catalogue that is most of a minute of database work before the owner sees
+// anything at all - and past sixty seconds, no answer ever came. The first two
+// steps build it instead (see migrations/013), so the dialog opens at once and
+// says which half it is on.
 export async function POST(req: NextRequest) {
   const user = await getSessionFromCookie()
   if (!user) return errorResponse('Not authenticated', 401)
@@ -36,6 +38,16 @@ export async function POST(req: NextRequest) {
   // would rewrite the very sheet being read and move the deletion baseline.
   if (await getLatestUnfinishedPullJob()) {
     return errorResponse('A pull from the sheet is in progress. Finish or cancel it before pushing.', 409)
+  }
+
+  // And while a check of the sheet is reading it: the check's reads and this
+  // push's writes share Google's per-minute quota, and the tabs it is part-way
+  // through reading are the ones this push is about to rewrite. A check left
+  // RUNNING by a closed browser is retired first, so it cannot block a Push for
+  // ever on behalf of nobody.
+  await expireStalePreviewJobs().catch(() => {})
+  if (await getRunningPreviewJob()) {
+    return errorResponse('Your sheet is being checked right now. Let that finish (or close it), then push.', 409)
   }
 
   // A push already under way (running, or failed mid-way with its cursor intact):
@@ -70,31 +82,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Snapshot the catalogue: the Products grid and one narrow grid per variable
-    // product. Titles are assigned here so a resumed step writes to the same tabs -
-    // reusing the title the last Push gave each product (kept in the manifest) so an
-    // existing tab is written into, not orphaned beside a fresh one.
-    // Which optional columns go in the sheet at all (stock, trade price) is the
-    // owner's setting, read here so both grids are built to the same shape.
-    const prefs = columnPrefsFrom(conn)
-    const [productsGrid, productTabs] = await Promise.all([buildProductsGrid(prefs), buildVariationTabs(prefs)])
-
-    const manifestBySlug = new Map((conn.variationTabManifest ?? []).map((m) => [m.slug, m.title]))
-    const taken = new Set<string>()
-    const withReusedTitle = productTabs.map((t) => {
-      const prev = manifestBySlug.get(t.slug)
-      if (prev && !taken.has(prev) && !RESERVED_TAB_TITLES.has(prev)) { taken.add(prev); return { t, title: prev as string | null } }
-      return { t, title: null as string | null }
-    })
-    const variationTabs: PushVariationTab[] = withReusedTitle.map(({ t, title }) => ({
-      slug: t.slug,
-      name: t.name,
-      title: title ?? productTabTitle(t.name, t.slug, taken),
-      grid: t.grid,
-    }))
-
-    const { id } = await createPushJob({ force, productsGrid, variationTabs, runBy: user.id })
-    return NextResponse.json({ pushJobId: id, tabsTotal: variationTabs.length, phase: 'PRODUCTS' })
+    const { id } = await createPushJob({ force, runBy: user.id })
+    return NextResponse.json({ pushJobId: id, tabsTotal: 0, phase: 'BUILD_PRODUCTS' }, { status: 202 })
   } catch (err) {
     if (err instanceof PushAlreadyRunningError) {
       const again = await getLatestUnfinishedPushJob()

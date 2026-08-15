@@ -1,0 +1,33 @@
+-- Google Sheet Products for Shop — 015: the standalone sheet snapshot is gone
+--
+-- gsp_sheet_snapshot (010) existed so a Pull started seconds after a preview
+-- could reuse what the preview had read, instead of fetching every tab again.
+-- The check is now a job of its own (012) and it keeps the grids it read on its
+-- own row, along with the Drive modifiedTime they were read under - and a Pull
+-- adopts that job wholesale rather than re-reading OR re-comparing anything. So
+-- this table had become write-only: every check wrote the whole workbook into it,
+-- several megabytes on a large catalogue, and nothing ever read it back.
+--
+-- Dropping it loses nothing. It only ever held a cache of the spreadsheet, it was
+-- rewritten in full on every check, the source of truth is the owner's own Google
+-- Drive, and the thing that used to read it no longer exists.
+--
+-- RESTORING AN OLDER BACKUP still works, which is the question worth answering
+-- before dropping any table. A backup taken while this table existed carries
+-- INSERTs for it; lib/backup/restore.ts checks every INSERT's table against
+-- information_schema first and SKIPS the ones the target does not have, listing
+-- them in `skippedTables` - the same path a backup from a site with a module this
+-- one has not installed takes. So an old backup restores cleanly and says it left
+-- this table's rows behind, rather than failing. The other direction is duller
+-- still: a new backup restored into an install that has not yet applied this
+-- migration simply leaves the table sitting there empty.
+--
+-- lib/backup/dump.ts discovers tables from information_schema at request time, so
+-- there is no list anywhere that has to be kept in step, and
+-- lib/backup/schema-coverage.test.ts asserts column TYPES have a serialiser
+-- branch rather than that any table exists - 010 keeps declaring its columns and
+-- the test keeps passing.
+--
+-- Idempotent: safe on fresh installs and re-runs.
+
+DROP TABLE IF EXISTS "gsp_sheet_snapshot";

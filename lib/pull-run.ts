@@ -36,6 +36,13 @@ const VAR_ROW_CHUNK = 50
 // when to stop starting chunks either way.
 const PROD_ROW_CHUNK = 40
 
+// How many products (or variants) are deleted per statement. Each one cascades
+// through its media, categories, variants, variant values and every module's
+// per-product rows, so this is a chunk of real work rather than a formality -
+// small enough that one chunk always finishes inside a step, large enough that a
+// big clear-out is not a thousand round trips.
+const DELETE_CHUNK = 100
+
 // How long one /pull/step keeps starting new chunks. Well under the module
 // dispatcher's 60s ceiling so the slowest single chunk still finishes and gets
 // its cursor write in before the platform kills the request.
@@ -103,6 +110,14 @@ function variationsDoneFor(job: PullJob): number {
 
 export async function pullStatus(job: PullJob): Promise<PullStatus> {
   const productsDone = productsDoneFor(job)
+  // The removals stage's own bar. The plan is cleared once the job finishes, so
+  // the total comes from the headline counts the check computed - which is the
+  // same number, and still there afterwards. A job from before the removals had a
+  // cursor reports zero of zero, and simply shows no bar.
+  const deletionsTotal = (job.detected?.productsDelete ?? 0) + (job.detected?.variationsDelete ?? 0)
+  const deletionsDone = job.phase === 'DELETIONS'
+    ? Math.min(job.prodDeletionsDone + job.varDeletionsDone, deletionsTotal)
+    : job.phase === 'PRODUCTS' ? 0 : deletionsTotal
   return {
     pullJobId: job.id,
     status: job.status,
@@ -112,6 +127,8 @@ export async function pullStatus(job: PullJob): Promise<PullStatus> {
     productsDone,
     variationsTotal: job.variationsTotal,
     variationsDone: variationsDoneFor(job),
+    deletionsTotal,
+    deletionsDone,
     // A stopped, failed or finished job has nothing in flight - the last name it
     // wrote would otherwise sit there reading as if work were still going on.
     currentItem: job.status === 'RUNNING' ? job.currentItem : null,
@@ -338,21 +355,62 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       // itself, and the product-attribute pass runs alongside the products chunks
       // - so all that is left here is the deletion plan captured at start against
       // the FULL snapshot (the stored grids are filtered, and re-planning from
-      // them would delete every skipped row). Both bulk deletes are single
-      // statements, so the phase stays well inside the step budget without a
-      // cursor of its own. A job from before the plan column existed has NULL
-      // there and full grids, so the old planner path still serves it.
+      // them would delete every skipped row). A job from before the plan column
+      // existed has NULL there and full grids, so the old planner path still
+      // serves it.
+      //
+      // Chunked, with a cursor, for the same reason the phases either side of it
+      // are: two DELETE statements is not the same as two quick statements, since
+      // each product cascades through its media, its variants, its variant values
+      // and every module's per-product rows. An unbounded plan blew the sixty-
+      // second ceiling, the platform killed the request part-way, and the retry
+      // started the whole plan again - a Pull stuck on "Removing items…" for ever.
       const plan = job.deletionPlan ?? await planPullDeletions(job.productsGrid, job.variationsGrid, job.lastPushAt)
-      const productDeletions = await applyProductDeletions(plan.products)
-      const variationDeletions = await applyVariationDeletions(plan.variations)
-      await updatePullJob(jobId, {
-        phase: 'VARIATIONS', status: 'RUNNING', error: null,
-        currentItem: null, currentOffset: 0,
-        prodDeleted: productDeletions.deleted,
-        varDeleted: variationDeletions.deleted,
-        prodErrors: [...(job.prodErrors ?? []), ...productDeletions.errors],
-        varErrors: [...(job.varErrors ?? []), ...variationDeletions.errors],
-      })
+      const stepStartedAt = Date.now()
+      let prodCursor = job.prodDeletionsDone
+      let varCursor = job.varDeletionsDone
+      let prodDeleted = job.prodDeleted
+      let varDeleted = job.varDeleted
+      let prodErrors = job.prodErrors ?? []
+      let varErrors = job.varErrors ?? []
+
+      while (prodCursor < plan.products.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+        if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
+        const chunk = plan.products.slice(prodCursor, prodCursor + DELETE_CHUNK)
+        const res = await applyProductDeletions(chunk)
+        prodCursor += chunk.length
+        prodDeleted += res.deleted
+        prodErrors = [...prodErrors, ...res.errors]
+        await updatePullJob(jobId, {
+          status: 'RUNNING', error: null,
+          prodDeletionsDone: prodCursor, prodDeleted, prodErrors,
+          // Named so the dialog says which product is going, not just how many.
+          currentItem: chunk[chunk.length - 1]?.name ?? null,
+        })
+      }
+
+      while (varCursor < plan.variations.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+        if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
+        const chunk = plan.variations.slice(varCursor, varCursor + DELETE_CHUNK)
+        const res = await applyVariationDeletions(chunk)
+        varCursor += chunk.length
+        varDeleted += res.deleted
+        varErrors = [...varErrors, ...res.errors]
+        await updatePullJob(jobId, {
+          status: 'RUNNING', error: null,
+          varDeletionsDone: varCursor, varDeleted, varErrors,
+          currentItem: chunk[chunk.length - 1]?.parentName ?? null,
+        })
+      }
+
+      // Only move on once BOTH lists are exhausted; a step that ran out of time
+      // part-way leaves the phase where it is and the next one carries on.
+      if (prodCursor >= plan.products.length && varCursor >= plan.variations.length) {
+        await updatePullJob(jobId, {
+          phase: 'VARIATIONS', status: 'RUNNING', error: null,
+          currentItem: null, currentOffset: 0,
+        })
+      }
     } else if (job.phase === 'VARIATIONS') {
       if (!job.variationsGrid) throw new Error('Pull job is missing its variations snapshot.')
       const header = job.variationsGrid[0] ?? []
@@ -465,8 +523,11 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
     // safe because a FAILED job keeps its cursor. Best-effort - if the database
     // is the thing that is down, this write fails too and there is nothing more
     // to be done from here.
-    console.error('[google-sheet-products-for-shop] pull step lock failed:', err)
+    // Message only, like every other log in this module: a database error object
+    // can carry the datasource URL, and this one goes straight to the platform's
+    // log where the owner's connection string has no business being.
     const reason = err instanceof Error ? err.message : 'Unknown error'
+    console.error('[google-sheet-products-for-shop] pull step lock failed:', reason)
     await updatePullJob(jobId, { status: 'FAILED', error: `A pull step could not run: ${reason}` }).catch(() => {})
   }
 

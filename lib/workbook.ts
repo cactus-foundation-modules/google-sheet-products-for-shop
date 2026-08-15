@@ -3,8 +3,8 @@ import { desiredTabOrder, sameOrder, reorderRequests } from '@/modules/google-sh
 import { targetRows, targetColumns, CREATED_TAB_COLUMNS, type PlannedTab } from '@/modules/google-sheet-products-for-shop/lib/capacity'
 
 // The fixed tabs, in order. Variations no longer has a single fixed tab: every
-// variable product gets its OWN tab (created on Push, see ensureVariationTab),
-// sitting between Products and Suppliers. Products MUST come before those product
+// variable product gets its OWN tab (created on Push, see
+// createVariationTabsBatch), sitting between Products and Suppliers. Products MUST come before those product
 // tabs because the Variations importer needs the parent products to already exist
 // (it will not create parents) - the sync handlers enforce the same order.
 //
@@ -183,19 +183,6 @@ export async function createWorkbook(title: string): Promise<{ spreadsheetId: st
   await batchUpdate(created.spreadsheetId, requests)
 
   return { spreadsheetId: created.spreadsheetId, spreadsheetUrl: created.spreadsheetUrl }
-}
-
-// Make sure a product's variation tab exists and is formatted, returning true
-// when it had to be created (so the caller knows a fresh header needs writing).
-// The tab title is a product's, computed by the caller (see variation-tabs.ts).
-// Idempotent: an existing tab is left exactly as it is, formatting and all.
-export async function ensureVariationTab(spreadsheetId: string, title: string): Promise<boolean> {
-  // Slot new product tabs right after Products; Google clamps an out-of-range
-  // index to the end, and existing tabs shift right harmlessly.
-  const sheetId = await addTab(spreadsheetId, title, 1)
-  if (sheetId === null) return false // already there
-  await batchUpdate(spreadsheetId, headerFormattingRequests(sheetId, SYNCED_HEADER_NOTE, CREATED_TAB_COLUMNS))
-  return true
 }
 
 // Create MANY variation tabs in one batchUpdate, formatting included - one write

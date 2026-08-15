@@ -78,12 +78,34 @@ function normHeader(grid: string[][]): string[] {
   return (grid[0] ?? []).map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'))
 }
 
-// Diff every Products row against what a Push would write for the matching
-// product - the exact same row builder, column for column. A column absent from
-// the sheet is not part of the sync and is never compared (the importer leaves
-// its field alone too). `results[i].row` is the grid row index (1-based data
-// rows start at 1), so callers can filter the grid by it.
-export async function diffProductRows(productsGrid: string[][]): Promise<ProductRowResult[]> {
+// Everything the Products diff needs loaded before it can judge a single row:
+// the catalogue as a Push would write it, the column map, the tax index, and each
+// contributing module's preloaded state. Built once by prepareProductDiff and
+// then reused for every row - which is the whole point of splitting the two.
+// A stepped preview prepares once per step and diffs as many rows as its time
+// budget allows; nothing re-loads per chunk.
+export type ProductDiffContext = {
+  grid: string[][]
+  /** How many data rows the grid has (row 0 is the header). */
+  rowCount: number
+  header: string[]
+  rawHeader: string[]
+  compared: Array<{ col: CsvColumn; idx: number }>
+  taxIndex: Map<string, { id: string }> | null
+  bySku: Map<string, ProductCsvRow>
+  bySlug: Map<string, ProductCsvRow>
+  providers: Awaited<ReturnType<typeof resolveProductFieldProviders>>
+  undiffableProviders: boolean
+  providerCtx: Map<string, unknown>
+  productBySlug: Map<string, ShpProduct>
+  designCol: number
+  cols: { name: number; type: number; price: number; status: number; sku: number; slug: number }
+}
+
+// Load everything the Products diff compares against. One call, whatever the
+// catalogue's size; the per-row work that follows touches no database at all
+// unless a module contributes its own columns.
+export async function prepareProductDiff(productsGrid: string[][]): Promise<ProductDiffContext> {
   const header = normHeader(productsGrid)
   // The header as typed, for the record handed to product-field providers - they
   // match a column by its attribute name, so it must not be normalised.
@@ -102,19 +124,6 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
   // already-correct value reads as changed forever. Only loaded when the sheet
   // carries the column.
   const taxIndex = header.includes('tax_class') ? await buildTaxClassRefIndex() : null
-  function taxClassEqual(from: string, to: string): boolean {
-    const f = from.trim().toLowerCase()
-    const t = to.trim().toLowerCase()
-    if (f === t) return true
-    if (!taxIndex) return false
-    const fc = taxIndex.get(f)
-    const tc = taxIndex.get(t)
-    // Both resolve to the same class (name vs code) -> equal. A non-empty value
-    // that resolves to nothing never equals the stored one, so the row goes
-    // through and the importer reports the unknown tax class rather than the Pull
-    // silently swallowing it.
-    return !!fc && !!tc && fc.id === tc.id
-  }
 
   const csvRows = await buildProductCsvRows()
   const bySku = new Map<string, ProductCsvRow>()
@@ -142,20 +151,62 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
   const providerCtx = new Map<string, unknown>()
   if (providers.length > 0) {
     const productIds = [...new Set([...productBySlug.values()].map((p) => p.id))]
-    for (const { id, provider } of providers) {
+    // Providers preload independently of one another, so they preload together.
+    await Promise.all(providers.map(async ({ id, provider }) => {
       if (provider.beginImport) providerCtx.set(id, await provider.beginImport(productIds))
-    }
+    }))
   }
 
-  const nameCol = header.indexOf('name')
-  const typeCol = header.indexOf('type')
-  const priceCol = header.indexOf('price')
-  const statusCol = header.indexOf('status')
-  const skuCol = header.indexOf('sku')
-  const slugCol = header.indexOf('slug')
+  return {
+    grid: productsGrid,
+    rowCount: Math.max(productsGrid.length - 1, 0),
+    header, rawHeader, compared, taxIndex, bySku, bySlug,
+    providers, undiffableProviders, providerCtx, productBySlug, designCol,
+    cols: {
+      name: header.indexOf('name'),
+      type: header.indexOf('type'),
+      price: header.indexOf('price'),
+      status: header.indexOf('status'),
+      sku: header.indexOf('sku'),
+      slug: header.indexOf('slug'),
+    },
+  }
+}
+
+// Diff a slice of the Products rows against the prepared catalogue view.
+// `fromRow`/`toRow` are 1-based grid row indices (row 0 is the header), `toRow`
+// exclusive - so a caller can walk the sheet a chunk at a time and bank a cursor
+// between chunks without re-loading anything.
+export async function diffProductRowRange(
+  ctx: ProductDiffContext,
+  fromRow: number,
+  toRow: number,
+  onRow?: (name: string) => void,
+): Promise<ProductRowResult[]> {
+  const {
+    grid: productsGrid, rawHeader, compared, taxIndex, bySku, bySlug,
+    providers, undiffableProviders, providerCtx, productBySlug, designCol, cols,
+  } = ctx
+  const { name: nameCol, type: typeCol, price: priceCol, status: statusCol, sku: skuCol, slug: slugCol } = cols
+
+  function taxClassEqual(from: string, to: string): boolean {
+    const f = from.trim().toLowerCase()
+    const t = to.trim().toLowerCase()
+    if (f === t) return true
+    if (!taxIndex) return false
+    const fc = taxIndex.get(f)
+    const tc = taxIndex.get(t)
+    // Both resolve to the same class (name vs code) -> equal. A non-empty value
+    // that resolves to nothing never equals the stored one, so the row goes
+    // through and the importer reports the unknown tax class rather than the Pull
+    // silently swallowing it.
+    return !!fc && !!tc && fc.id === tc.id
+  }
 
   const results: ProductRowResult[] = []
-  for (let r = 1; r < productsGrid.length; r++) {
+  const start = Math.max(fromRow, 1)
+  const end = Math.min(toRow, productsGrid.length)
+  for (let r = start; r < end; r++) {
     const row = productsGrid[r] ?? []
     // A row blank across every pushed column is not a product - a spacer the
     // owner left, or a gap a v0.1.33 Push blanked in place before deletions
@@ -169,6 +220,7 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
     const statusRaw = at(statusCol)
     const sku = at(skuCol) || null
 
+    onRow?.(name)
     if (!name) { results.push({ row: r, kind: 'error', reason: 'Missing name' }); continue }
     if (!VALID_TYPE.has(type)) { results.push({ row: r, kind: 'error', reason: `Invalid type "${at(typeCol)}"` }); continue }
     if (statusRaw && !VALID_STATUS.has(statusRaw.toUpperCase())) { results.push({ row: r, kind: 'error', reason: `Invalid status "${statusRaw}"` }); continue }
@@ -238,6 +290,21 @@ export async function diffProductRows(productsGrid: string[][]): Promise<Product
     }
   }
   return results
+}
+
+// Diff every Products row against what a Push would write for the matching
+// product - the exact same row builder, column for column. A column absent from
+// the sheet is not part of the sync and is never compared (the importer leaves
+// its field alone too). `results[i].row` is the grid row index (1-based data
+// rows start at 1), so callers can filter the grid by it.
+//
+// Prepare, then diff the lot. The check drives the two halves directly so it can
+// bank a cursor between chunks; this whole-grid form is what the unit tests
+// exercise, which is the point of keeping it - the rules below are pinned by
+// tests written against one call, and they should stay that way.
+export async function diffProductRows(productsGrid: string[][]): Promise<ProductRowResult[]> {
+  const ctx = await prepareProductDiff(productsGrid)
+  return diffProductRowRange(ctx, 1, productsGrid.length)
 }
 
 // Would any product-field provider column change for this row? Builds the same
@@ -328,21 +395,57 @@ async function providerRowChanged(
   return false
 }
 
-// Diff every Variations row: create / update / unchanged / error, per grid row.
-// Same resolution the importer uses (parent by slug, variant by its unordered
-// option-value set), with module-provided columns (3D files, attributes) diffed
-// through each provider's read-only rowChanged. A provider without rowChanged
-// cannot be diffed, so its rows are never called unchanged - see below.
-export async function diffVariationRows(grid: string[][]): Promise<VariationRowResult[]> {
-  const results: VariationRowResult[] = []
-  if (grid.length < 2) return results
+// How many parent products are diffed at once. Each one loads its contributing
+// modules' state and then resolves its own value labels, and those round trips
+// are what a big catalogue's compare is actually made of - run strictly one
+// parent after another, several hundred parents is minutes of waiting on the
+// database rather than working. Six at a time keeps the connection pool
+// comfortable (the pool is shared with everything else the admin is doing) while
+// cutting the wall clock to a fraction. Results are still assembled in order.
+const PARENT_CONCURRENCY = 6
+
+// Everything the Variations diff needs before it can judge a row: the column
+// map, the sheet's rows grouped by parent, each parent product, and each
+// parent's options and variants. Built once by prepareVariationDiff; the group
+// range that follows adds only each parent's own provider preloads.
+export type VariationDiffContext = {
+  header: string[]
+  slugCol: number
+  idCol: number
+  optionPairs: Array<{ nameCol: number; valueCol: number }>
+  fieldCol: {
+    sku: number; saleSku: number; price: number; salePrice: number; rrp: number; tradePrice: number
+    costPrice: number; stock: number; barcode: number; supplier: number; weight: number; image: number
+  }
+  /** Parent groups in sheet order - the unit the cursor counts in. */
+  groups: Array<{ slug: string; rows: Array<{ row: number; cols: string[] }> }>
+  /** Rows the grouping itself rejected (no parent slug, or no slug column). */
+  preErrors: VariationRowResult[]
+  parentBySlug: Map<string, ShpProduct>
+  payloadByParentId: Awaited<ReturnType<typeof getEditorPayloadsBatch>>
+  providers: Awaited<ReturnType<typeof resolveVariantFieldProviders>>
+  undiffableProviders: boolean
+}
+
+// Load everything the Variations diff compares against - one batch per thing,
+// whatever the catalogue's size.
+export async function prepareVariationDiff(grid: string[][]): Promise<VariationDiffContext> {
+  const empty: VariationDiffContext = {
+    header: [], slugCol: -1, idCol: -1, optionPairs: [],
+    fieldCol: {
+      sku: -1, saleSku: -1, price: -1, salePrice: -1, rrp: -1, tradePrice: -1,
+      costPrice: -1, stock: -1, barcode: -1, supplier: -1, weight: -1, image: -1,
+    },
+    groups: [], preErrors: [], parentBySlug: new Map(), payloadByParentId: new Map(),
+    providers: [], undiffableProviders: false,
+  }
+  if (grid.length < 2) return empty
 
   const header = (grid[0] ?? []).map((h) => h.trim())
   const idx = (name: string) => header.findIndex((h) => h.toLowerCase() === name.toLowerCase())
   const slugCol = idx('Parent Slug')
   if (slugCol < 0) {
-    results.push({ row: 0, kind: 'error', reason: 'Missing "Parent Slug" column' })
-    return results
+    return { ...empty, preErrors: [{ row: 0, kind: 'error', reason: 'Missing "Parent Slug" column' }] }
   }
   const optionPairs: Array<{ nameCol: number; valueCol: number }> = []
   for (let i = 1; ; i++) {
@@ -370,7 +473,8 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
   // every matched row counts as an update. Slower, never wrong.
   const undiffableProviders = allProviders.length > providers.length
 
-  const groups = new Map<string, Array<{ row: number; cols: string[] }>>()
+  const preErrors: VariationRowResult[] = []
+  const byslug = new Map<string, Array<{ row: number; cols: string[] }>>()
   for (let r = 1; r < grid.length; r++) {
     const cols = grid[r] ?? []
     const slug = (cols[slugCol] ?? '').trim()
@@ -378,25 +482,62 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
       // Fully-blank row (a spacer, or a gap left by a v0.1.33 Push) - skip
       // silently. Only a row with real content but no slug is an error.
       if (knownVarCols.every((i) => (cols[i] ?? '').trim() === '')) continue
-      results.push({ row: r, kind: 'error', reason: 'Missing parent slug' })
+      preErrors.push({ row: r, kind: 'error', reason: 'Missing parent slug' })
       continue
     }
-    const list = groups.get(slug) ?? []
+    const list = byslug.get(slug) ?? []
     list.push({ row: r, cols })
-    groups.set(slug, list)
+    byslug.set(slug, list)
   }
 
   // Both the parent lookup and each parent's editor payload are resolved once for
   // every distinct slug in the sheet, rather than per group.
-  const parentBySlug = await getProductsBySlugs([...groups.keys()])
+  const parentBySlug = await getProductsBySlugs([...byslug.keys()])
   const payloadByParentId = await getEditorPayloadsBatch([...parentBySlug.values()])
 
-  for (const [slug, rows] of groups) {
-    const parent = parentBySlug.get(slug)
-    if (!parent) {
-      for (const gr of rows) results.push({ row: gr.row, kind: 'error', reason: `Parent product not found: ${slug}` })
-      continue
-    }
+  return {
+    header, slugCol, idCol, optionPairs, fieldCol,
+    groups: [...byslug].map(([slug, rows]) => ({ slug, rows })),
+    preErrors, parentBySlug, payloadByParentId, providers, undiffableProviders,
+  }
+}
+
+// Diff a slice of the parent groups, `toGroup` exclusive. Parents are
+// independent of one another, so PARENT_CONCURRENCY of them run at once and the
+// results are concatenated in group order.
+export async function diffVariationGroupRange(
+  ctx: VariationDiffContext,
+  fromGroup: number,
+  toGroup: number,
+  onParent?: (name: string) => void,
+): Promise<VariationRowResult[]> {
+  const slice = ctx.groups.slice(Math.max(fromGroup, 0), Math.max(toGroup, 0))
+  const out: VariationRowResult[] = []
+  for (let i = 0; i < slice.length; i += PARENT_CONCURRENCY) {
+    const batch = slice.slice(i, i + PARENT_CONCURRENCY)
+    const done = await Promise.all(batch.map((g) => diffOneParent(ctx, g.slug, g.rows, onParent)))
+    for (const rows of done) out.push(...rows)
+  }
+  return out
+}
+
+// One parent's rows: resolve its values, preload each contributing module's
+// state for its children, then judge every row against what is stored.
+async function diffOneParent(
+  ctx: VariationDiffContext,
+  slug: string,
+  rows: Array<{ row: number; cols: string[] }>,
+  onParent?: (name: string) => void,
+): Promise<VariationRowResult[]> {
+  const { header, idCol, optionPairs, fieldCol, parentBySlug, payloadByParentId, providers, undiffableProviders } = ctx
+  const results: VariationRowResult[] = []
+  const parent = parentBySlug.get(slug)
+  if (!parent) {
+    for (const gr of rows) results.push({ row: gr.row, kind: 'error', reason: `Parent product not found: ${slug}` })
+    return results
+  }
+  onParent?.(parent.name)
+  {
     const payload = payloadByParentId.get(parent.id)
     // Slug first, label as the legacy fallback - the same resolution order the
     // importer applies to a "(slug)Label" cell. Where duplicate labels exist the
@@ -423,9 +564,10 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
     const providerCtx = new Map<string, unknown>()
     if (providers.length > 0) {
       const childIds = (payload?.variants ?? []).map((v) => v.childProductId)
-      for (const { id, provider } of providers) {
+      // Providers preload independently of one another, so they preload together.
+      await Promise.all(providers.map(async ({ id, provider }) => {
         if (provider.beginImport) providerCtx.set(id, await provider.beginImport(parent.id, childIds))
-      }
+      }))
     }
 
     for (const gr of rows) {
@@ -483,26 +625,43 @@ export async function diffVariationRows(grid: string[][]): Promise<VariationRowR
   return results
 }
 
-// Header + every row the diff did NOT prove unchanged, in sheet order. What the
-// Pull stores and feeds to the importers: creates, updates and error rows all go
-// through (the importer reports its own row errors, exactly as before); rows
-// that match the shop cell-for-cell are the only thing dropped.
+// Diff every Variations row: create / update / unchanged / error, per grid row.
+// Same resolution the importer uses (parent by slug, variant by its unordered
+// option-value set), with module-provided columns (3D files, attributes) diffed
+// through each provider's read-only rowChanged. A provider without rowChanged
+// cannot be diffed, so its rows are never called unchanged.
 //
-// `sheetRows` carries the original 1-based sheet row number of each kept data
-// row (aligned with the returned grid's data rows), so an error the Pull reports
-// against the filtered grid can be translated back to the row the owner sees.
-export function filterGridByDiff(
+// Prepare, then diff every parent group. As above: the check drives the two
+// halves directly, and this whole-grid form is what the unit tests exercise.
+export async function diffVariationRows(grid: string[][]): Promise<VariationRowResult[]> {
+  const ctx = await prepareVariationDiff(grid)
+  const rest = await diffVariationGroupRange(ctx, 0, ctx.groups.length)
+  return [...ctx.preErrors, ...rest]
+}
+
+// The data rows a chunk's results did not prove unchanged, each with its
+// original 1-based sheet row number - what the Pull stores and feeds to the
+// importers. Creates, updates and error rows all go through (the importer
+// reports its own row errors, exactly as before); rows that match the shop
+// cell-for-cell are the only thing dropped.
+//
+// The sheet row numbers matter because the grid the Pull carries is the filtered
+// one: an error the importer reports against row 12 of that has to be translated
+// back to the row the owner is looking at.
+//
+// Rows come back in sheet order, so a caller accumulating chunk after chunk ends
+// up with exactly what a single pass over the whole grid would have produced.
+export function keptRowsFromResults(
   grid: string[][],
   results: Array<{ row: number; kind: string }>,
-): { grid: string[][]; sheetRows: number[] } {
-  const keep = new Set(results.filter((r) => r.kind !== 'unchanged').map((r) => r.row))
-  const out: string[][] = [grid[0] ?? []]
+): { rows: string[][]; sheetRows: number[] } {
+  const keep = [...new Set(results.filter((r) => r.kind !== 'unchanged').map((r) => r.row))].sort((a, b) => a - b)
+  const rows: string[][] = []
   const sheetRows: number[] = []
-  for (let r = 1; r < grid.length; r++) {
-    if (keep.has(r)) {
-      out.push(grid[r] ?? [])
-      sheetRows.push(r + 1) // grid index r -> sheet row r+1 (row 0 is the header)
-    }
+  for (const r of keep) {
+    if (r < 1 || r >= grid.length) continue // row 0 is the header; a preError on it carries no row to import
+    rows.push(grid[r] ?? [])
+    sheetRows.push(r + 1)
   }
-  return { grid: out, sheetRows }
+  return { rows, sheetRows }
 }

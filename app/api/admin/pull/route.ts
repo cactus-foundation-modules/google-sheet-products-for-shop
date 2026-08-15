@@ -1,35 +1,45 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { createImportJob, markImportJobStarted, markImportJobCompleted } from '@/modules/shop/lib/db/import-jobs'
-import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { readGrid, getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
-import { readMergedVariations } from '@/modules/google-sheet-products-for-shop/lib/pull-variations'
-import { loadSheetSnapshot, snapshotIsCurrent } from '@/modules/google-sheet-products-for-shop/lib/sheet-snapshot'
-import { slugsInMergedGrid, missingManifestSlugs } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
-import { missingProductsColumns } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
-import { columnPrefsFrom, excludedProductColumns } from '@/modules/google-sheet-products-for-shop/lib/columns'
-import { diffProductRows, diffVariationRows, filterGridByDiff } from '@/modules/google-sheet-products-for-shop/lib/pull-diff'
-import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
+import { getSheetModifiedTime } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { createPullJob, getLatestUnfinishedPullJob, PullAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
-import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
-import type { PullDetected } from '@/modules/google-sheet-products-for-shop/lib/types'
+import { getPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
+import type { PullDetected, PreviewJob, StoredDeletionPlan } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-// Start a Pull. A Pull is a resumable job the browser drives step by step (see
-// lib/pull-run.ts): this route reads the sheet, diffs it against the shop, and
-// creates the job row - the heavy work happens in /pull/step calls.
+// How old a finished check may be and still be adopted. A Pull is normally
+// pressed seconds after the dialog lists what it will do; a dialog left open over
+// lunch is re-checked rather than trusted, because the catalogue may have moved
+// underneath it in the meantime.
+const PREVIEW_MAX_AGE_MS = 15 * 60_000
+
+// The same, for the awkward case where Drive will not say when the sheet was
+// last touched - it answers null rather than failing, and has been known to. With
+// no timestamp on either side there is nothing to compare, so the only honest
+// guard left is how recently the owner looked at the list. Kept short: minutes of
+// exposure to an edit made in another tab, against a Pull that could otherwise
+// never be started at all on a site where Drive is quiet.
+const PREVIEW_NO_DRIVE_MAX_AGE_MS = 2 * 60_000
+
+// Start a Pull.
 //
-// The diff-at-start is what makes a no-change Pull quick: rows proved identical
-// to the shop never reach the importers at all, so the job only carries (and the
-// steps only process) rows that create, change, or error. The deletion side is
-// planned here from the FULL grids - the filtered ones would read every skipped
-// row as "gone from the sheet" - and stored on the job for the DELETIONS phase
-// to apply verbatim.
-export async function POST() {
+// This route does no reading and no comparing. The check the owner just
+// confirmed (see lib/preview-run.ts) read every tab, compared every row and
+// planned every deletion, and it kept all of it - so all that is left here is to
+// adopt those results and create the job the browser will step through.
+//
+// It used to do the whole sweep itself, a second time, inside one request: read
+// the workbook, build the catalogue's CSV view, diff every row, plan every
+// deletion. That is minutes of work on a real catalogue and the platform kills a
+// module route at sixty seconds, so on a big shop the Pull could not start at
+// all - and when it could, it had just spent that time proving again what the
+// dialog had already shown. Refusing a stale check (below) and asking the browser
+// to run another one is both quicker and honest: a check reports its progress and
+// cannot run out of time, and this route can no longer be the thing that hangs.
+export async function POST(req: NextRequest) {
   const user = await getSessionFromCookie()
   if (!user) return errorResponse('Not authenticated', 401)
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
@@ -49,143 +59,130 @@ export async function POST() {
     )
   }
 
-  // Refuse while a Push is part-way through - same guard as the preview, for the
-  // same two reasons: a running push is spending the read quota this route needs
-  // to read the sheet, and it is rewriting the tabs mid-read. Push has the mirror
-  // guard against a running Pull.
+  // Refuse while a Push is part-way through: it is rewriting the very tabs the
+  // check read. Push has the mirror guard against a running Pull.
   if (await getLatestUnfinishedPushJob()) {
     return errorResponse('A push to the sheet is part-way through. Open Push and let it finish (or cancel it), then pull.', 409)
   }
 
-  // Read the Products tab and merge every per-product variation tab up front, so an
-  // auth failure or a mangled header is reported synchronously, before we create
-  // any job or touch the database.
-  //
-  // Usually a preview ran seconds ago and stored exactly these grids beside the
-  // sheet's Drive modifiedTime. One Drive call tells us whether the sheet has
-  // moved since: an EXACT modifiedTime match means the sheet is byte-for-byte
-  // what the preview read, so the whole sweep is skipped; anything else - an
-  // edit, a Push, no snapshot, Drive not answering - reads fresh exactly as
-  // before. The catalogue diff below is recomputed either way, so a change on
-  // the DATABASE side between preview and pull is always picked up.
-  let productsGrid: string[][]
-  let variationsGrid: string[][]
-  try {
-    const [snapshot, modifiedAt] = await Promise.all([
-      loadSheetSnapshot().catch(() => null),
-      getSheetModifiedTime(conn.spreadsheetId),
-    ])
-    if (snapshot && snapshotIsCurrent(snapshot.driveModifiedTime, modifiedAt)) {
-      productsGrid = snapshot.productsGrid
-      variationsGrid = snapshot.variationsGrid
-    } else {
-      productsGrid = await readGrid(conn.spreadsheetId, TAB.PRODUCTS)
-      variationsGrid = await readMergedVariations(conn.spreadsheetId)
-    }
-  } catch (err) {
-    if (err instanceof GoogleAuthError) return errorResponse(err.message, 400)
-    const reason = sheetFailureReason(err)
-    console.error('[google-sheet-products-for-shop/pull] read failed:', reason)
-    return errorResponse(`Could not read the Google Sheet. ${reason}`, 502)
+  const body = await req.json().catch(() => ({}))
+  const previewJobId = body && typeof body === 'object' && typeof body.previewJobId === 'string' ? body.previewJobId : null
+
+  const adopted = previewJobId ? await adoptPreview(previewJobId, conn.spreadsheetId) : null
+  if (!adopted) {
+    // No usable check. The browser re-runs one (which is bounded, reports its
+    // progress, and shows the owner the new answer to confirm) rather than this
+    // route quietly doing the work with nothing on screen.
+    return NextResponse.json(
+      {
+        error: 'Your sheet has changed since it was checked, so this list is out of date. Checking it again now.',
+        stalePreview: true,
+      },
+      { status: 409 },
+    )
   }
 
-  const missing = missingProductsColumns(productsGrid, excludedProductColumns(columnPrefsFrom(conn)))
-  if (missing.length) {
-    return errorResponse(`Your sheet's Products tab is missing these columns: ${missing.join(', ')}. Fix the header row (or reset the sheet) and try again.`, 400)
-  }
+  const started = await startPullJob({ ...adopted, runBy: user.id })
+  if ('error' in started) return started.error
+  return NextResponse.json(started.body, { status: 202 })
+}
 
-  // Manifest guard: with one tab per product, a renamed or deleted product tab
-  // would make its variants vanish from the merged grid - and a Pull would read
-  // that as "these variants were removed" and delete them. So refuse when a product
-  // the last Push recorded is no longer anywhere in the sheet, naming the tab to
-  // restore. A workbook pushed before manifests existed has none, and falls through
-  // to the older backstop below.
-  const manifest = conn.variationTabManifest ?? []
-  if (manifest.length > 0) {
-    const present = slugsInMergedGrid(variationsGrid)
-    const missingSlugs = missingManifestSlugs(manifest.map((m) => m.slug), present)
-    if (missingSlugs.length > 0) {
-      const titles = manifest.filter((m) => missingSlugs.includes(m.slug)).map((m) => `"${m.title}"`)
-      return errorResponse(
-        `These product tabs are missing from your sheet: ${titles.join(', ')}. A tab has been renamed, deleted or emptied since your last Push, so a Pull cannot tell which of those variations you still have - it would try to delete them all. Restore the tab (or Push again) and try again.`,
-        400,
-      )
-    }
-  } else if (((variationsGrid[0] ?? [])[0] ?? '').trim().toLowerCase() !== 'parent slug') {
-    // No manifest and no variation tabs at all: if the shop still has variants,
-    // pulling would read them as "all removed". Refuse until a Push seeds the tabs.
-    const withVariants = await getProductIdsWithVariations()
-    if (withVariants.length > 0) {
-      return errorResponse('Your sheet has no product variation tabs, so a Pull cannot tell which variations you still have and would try to delete every one. Push to the sheet first, then pull.', 400)
-    }
-  }
+// What a Pull needs to run.
+type PullStartInput = {
+  productsGrid: string[][]
+  variationsGrid: string[][]
+  productsRowMap: number[]
+  variationsRowMap: number[]
+  deletionPlan: StoredDeletionPlan
+  lastPushAt: Date | null
+  detected: PullDetected
+  runBy: string
+}
 
-  // Diff and plan against the FULL snapshot, then keep only the rows with work
-  // in them. Failures here mean the comparison fell over, not the sheet - say so.
-  let filteredProducts: { grid: string[][]; sheetRows: number[] }
-  let filteredVariations: { grid: string[][]; sheetRows: number[] }
-  let detected: PullDetected
-  let plan: Awaited<ReturnType<typeof planPullDeletions>>
-  try {
-    const prodResults = await diffProductRows(productsGrid)
-    const varResults = await diffVariationRows(variationsGrid)
-    plan = await planPullDeletions(productsGrid, variationsGrid, conn.lastPushAt)
-    filteredProducts = filterGridByDiff(productsGrid, prodResults)
-    filteredVariations = filterGridByDiff(variationsGrid, varResults)
-    // The headline counts, computed here from the same diff that filtered the
-    // grids - never taken from the browser, so the dialog cannot be spoofed or
-    // simply stale by the time the owner presses Pull.
-    detected = {
-      productsCreate: prodResults.filter((r) => r.kind === 'create').length,
-      productsUpdate: prodResults.filter((r) => r.kind === 'update').length,
-      productsDelete: plan.products.length,
-      variationsCreate: varResults.filter((r) => r.kind === 'create').length,
-      variationsUpdate: varResults.filter((r) => r.kind === 'update').length,
-      variationsDelete: plan.variations.length,
-      productsUnchanged: prodResults.filter((r) => r.kind === 'unchanged').length,
-      variationsUnchanged: varResults.filter((r) => r.kind === 'unchanged').length,
-    }
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : 'Unknown error'
-    console.error('[google-sheet-products-for-shop/pull] diff failed:', reason)
-    return errorResponse(`Read the sheet fine, but comparing it with your catalogue failed: ${reason}`, 500)
-  }
-
-  const productsTotal = Math.max(filteredProducts.grid.length - 1, 0)
-  const variationsTotal = Math.max(filteredVariations.grid.length - 1, 0)
+// Create shop's import job and this module's pull job, in that order, and give
+// back what the browser needs to start stepping.
+async function startPullJob(
+  input: PullStartInput,
+): Promise<{ body: { pullJobId: string; productsTotal: number; variationsTotal: number; detected: PullDetected } } | { error: NextResponse }> {
+  const productsTotal = Math.max(input.productsGrid.length - 1, 0)
+  const variationsTotal = Math.max(input.variationsGrid.length - 1, 0)
 
   // The shop import job carries the products phase and its live per-row progress.
-  const { id: shopImportJobId } = await createImportJob({ filename: 'Google Sheet pull', totalRows: productsTotal, createdBy: user.id, columnMap: null })
+  const { id: shopImportJobId } = await createImportJob({ filename: 'Google Sheet pull', totalRows: productsTotal, createdBy: input.runBy, columnMap: null })
   await markImportJobStarted(shopImportJobId)
 
   // If creating the pull job fails - a lost connection, or the concurrency guard
   // firing on a race - the shop import job we just started must not be left
   // "running" forever in shop's own listing. Fail it, then surface the reason.
-  let pullJobId: string
   try {
-    ;({ id: pullJobId } = await createPullJob({
-      productsGrid: filteredProducts.grid,
-      variationsGrid: filteredVariations.grid,
-      productsRowMap: filteredProducts.sheetRows,
-      variationsRowMap: filteredVariations.sheetRows,
-      deletionPlan: plan,
-      lastPushAt: conn.lastPushAt,
+    const { id: pullJobId } = await createPullJob({
+      productsGrid: input.productsGrid,
+      variationsGrid: input.variationsGrid,
+      productsRowMap: input.productsRowMap,
+      variationsRowMap: input.variationsRowMap,
+      deletionPlan: input.deletionPlan,
+      lastPushAt: input.lastPushAt,
       shopImportJobId,
-      detected,
+      detected: input.detected,
       productsTotal, variationsTotal,
-      runBy: user.id,
-    }))
+      runBy: input.runBy,
+    })
+    return { body: { pullJobId, productsTotal, variationsTotal, detected: input.detected } }
   } catch (err) {
     await markImportJobCompleted(shopImportJobId, 'FAILED').catch(() => {})
     if (err instanceof PullAlreadyRunningError) {
       const running = await getLatestUnfinishedPullJob()
-      return NextResponse.json(
-        { error: 'A pull is already in progress. Continue or cancel it first.', pullJobId: running?.id },
-        { status: 409 },
-      )
+      return {
+        error: NextResponse.json(
+          { error: 'A pull is already in progress. Continue or cancel it first.', pullJobId: running?.id },
+          { status: 409 },
+        ),
+      }
     }
     throw err
   }
+}
 
-  return NextResponse.json({ pullJobId, productsTotal, variationsTotal, detected }, { status: 202 })
+// May this finished check be acted on? Only when it finished cleanly, has
+// everything a Pull needs, is minutes rather than hours old, and the sheet has
+// not moved a byte since it was read - judged by an EXACT match on Drive's
+// modifiedTime, the same test the snapshot reuse uses. Anything uncertain (Drive
+// not answering, no stored time) reads as "no", and the owner gets a fresh check.
+async function adoptPreview(previewJobId: string, spreadsheetId: string): Promise<Omit<PullStartInput, 'runBy'> | null> {
+  let job: PreviewJob | null = null
+  try {
+    job = await getPreviewJob(previewJobId)
+  } catch {
+    return null
+  }
+  if (!job || job.status !== 'COMPLETED') return null
+  if (!job.filteredProducts || !job.filteredVariations || !job.detected) return null
+  if ((job.preview?.headerMissing.length ?? 0) > 0) return null
+
+  const age = Date.now() - job.createdAt.getTime()
+  const modifiedAt = await getSheetModifiedTime(spreadsheetId).catch(() => null)
+
+  if (job.driveModifiedTime) {
+    if (age > PREVIEW_MAX_AGE_MS) return null
+    // Drive answered when the check ran, so it has to answer now and agree.
+    if (!modifiedAt || modifiedAt.getTime() !== job.driveModifiedTime.getTime()) return null
+  } else {
+    // Drive would not say when the check read the sheet. If it will not say now
+    // either, it is quiet for this site rather than hiding an edit, and the only
+    // guard left is how fresh the list is. If it HAS found its voice since, we
+    // have a timestamp we cannot compare against anything - refuse and re-check,
+    // which will pin the new one down properly.
+    if (modifiedAt !== null) return null
+    if (age > PREVIEW_NO_DRIVE_MAX_AGE_MS) return null
+  }
+
+  return {
+    productsGrid: job.filteredProducts,
+    variationsGrid: job.filteredVariations,
+    productsRowMap: job.productsRowMap ?? [],
+    variationsRowMap: job.variationsRowMap ?? [],
+    deletionPlan: job.deletionPlan ?? { products: [], variations: [] },
+    lastPushAt: job.lastPushAt,
+    detected: job.detected,
+  }
 }

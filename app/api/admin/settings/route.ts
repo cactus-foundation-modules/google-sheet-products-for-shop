@@ -6,6 +6,9 @@ import { errorResponse } from '@/lib/utils'
 import { getSiteUrlOrNull } from '@/lib/config/env'
 import { getConnection, saveOAuthClient, saveColumnPreferences } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { buildGoogleRedirectUri } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
+import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
+import { getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { getRunningPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 
 export async function GET() {
   const user = await getSessionFromCookie()
@@ -14,6 +17,11 @@ export async function GET() {
 
   const conn = await getConnection()
   const siteUrl = getSiteUrlOrNull()
+  // What is going on right now, so the settings tab can say "a pull is part-way
+  // through" rather than letting the owner reset a sheet out from under it.
+  const [push, pull, check] = await Promise.all([
+    getLatestUnfinishedPushJob(), getLatestUnfinishedPullJob(), getRunningPreviewJob(),
+  ])
 
   // Never return decrypted secrets to the client - only whether they're set.
   return NextResponse.json({
@@ -26,6 +34,10 @@ export async function GET() {
     includeTradePrice: conn?.includeTradePrice ?? true,
     lastPushAt: conn?.lastPushAt ?? null,
     lastPullAt: conn?.lastPullAt ?? null,
+    // How many product tabs the last successful Push wrote - the plainest measure
+    // of how big the sheet actually is.
+    variationTabCount: conn?.variationTabManifest?.length ?? 0,
+    busy: { push: !!push, pull: !!pull, check: !!check },
     // The two values the owner must paste into their Google OAuth client. The
     // redirect URI is the one Google checks byte-for-byte - a mismatch here is
     // the redirect_uri_mismatch error. Null only if SITE_URL is unset.

@@ -1,6 +1,8 @@
 import { prisma } from '@/lib/db/prisma'
-import { pushProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/push-products'
-import { pushVariationTabsBatch } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
+import { pushProductsGrid, buildProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/push-products'
+import { pushVariationTabsBatch, buildVariationTabs } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
+import { columnPrefsFrom } from '@/modules/google-sheet-products-for-shop/lib/columns'
+import { productTabTitle } from '@/modules/google-sheet-products-for-shop/lib/variation-tabs'
 import { pushSuppliersTab } from '@/modules/google-sheet-products-for-shop/lib/push-supplier-catalogues'
 import { createVariationTabsBatch, orderTabs } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import { getSheetIds, getSheetGrids, deleteSheets, readHeaderRows, getSheetModifiedTime, batchUpdate } from '@/modules/google-sheet-products-for-shop/lib/sheets'
@@ -118,9 +120,39 @@ async function runPushStep(job: PushJob): Promise<void> {
   try {
     const conn = await getConnection()
     if (!conn?.spreadsheetId) throw new Error('The Google Sheet connection is missing its spreadsheet.')
-    const spreadsheetId = conn.spreadsheetId
+    const spreadsheetId: string = conn.spreadsheetId
 
-    if (job.phase === 'PRODUCTS') {
+    if (job.phase === 'BUILD_PRODUCTS') {
+      // The Products tab grid: every product, with its categories, tags,
+      // collections, media and any columns another module contributes. Heavy
+      // enough on a real catalogue to deserve a step of its own, which is the
+      // point - the dialog is already open and saying so.
+      const grid = await buildProductsGrid(columnPrefsFrom(conn))
+      await updatePushJob(jobId, { phase: 'BUILD_TABS', status: 'RUNNING', error: null, productsGrid: grid })
+    } else if (job.phase === 'BUILD_TABS') {
+      // One narrow grid per variable product. Titles are assigned HERE rather
+      // than at write time so a resumed step writes to the same tabs: each
+      // product reuses the title the last Push gave it (kept in the manifest), so
+      // an existing tab is written into rather than orphaned beside a fresh one.
+      const productTabs = await buildVariationTabs(columnPrefsFrom(conn))
+      const manifestBySlug = new Map((conn.variationTabManifest ?? []).map((m) => [m.slug, m.title]))
+      const taken = new Set<string>()
+      const withReusedTitle = productTabs.map((t) => {
+        const prev = manifestBySlug.get(t.slug)
+        if (prev && !taken.has(prev) && !RESERVED_TAB_TITLES.has(prev)) { taken.add(prev); return { t, title: prev as string | null } }
+        return { t, title: null as string | null }
+      })
+      const variationTabs: PushVariationTab[] = withReusedTitle.map(({ t, title }) => ({
+        slug: t.slug,
+        name: t.name,
+        title: title ?? productTabTitle(t.name, t.slug, taken),
+        grid: t.grid,
+      }))
+      await updatePushJob(jobId, {
+        phase: 'PRODUCTS', status: 'RUNNING', error: null,
+        variationTabs, tabsTotal: variationTabs.length,
+      })
+    } else if (job.phase === 'PRODUCTS') {
       if (!job.productsGrid) throw new Error('Push job is missing its products snapshot.')
       const res = await pushProductsGrid(spreadsheetId, job.productsGrid)
       await stampLastPushAttempt()
@@ -275,8 +307,9 @@ export async function stepPushJob(jobId: string): Promise<PushStatus | null> {
       // Only the lease/read machinery's own failures land here - a phase error is
       // caught inside runPushStep and recorded on the job. Record this too, so the
       // browser sees a reason and a Continue rather than looping on a stale snapshot.
-      console.error('[google-sheet-products-for-shop] push step failed:', err)
+      // Message only - a database error object can carry the datasource URL.
       const reason = err instanceof Error ? err.message : 'Unknown error'
+      console.error('[google-sheet-products-for-shop] push step failed:', reason)
       await updatePushJob(jobId, { status: 'FAILED', error: `A push step could not run: ${reason}` }).catch(() => {})
     } finally {
       await releasePushStepLease(jobId, lease)

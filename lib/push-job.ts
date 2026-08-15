@@ -45,23 +45,15 @@ function mapJob(r: Record<string, unknown>): PushJob {
 // second RUNNING job - two starts raced past the app-level check. Turned into 409.
 export class PushAlreadyRunningError extends Error {}
 
-export async function createPushJob(data: {
-  force: boolean
-  productsGrid: Cell[][]
-  variationTabs: PushVariationTab[]
-  runBy: string
-}): Promise<{ id: string }> {
+// The job is created EMPTY: assembling the catalogue snapshot is the first two
+// steps' work, not something POST /push does before it answers (see
+// migrations/013). That is what puts the dialog on screen in the first second
+// rather than after a minute of silence.
+export async function createPushJob(data: { force: boolean; runBy: string }): Promise<{ id: string }> {
   try {
     const rows = await prisma.$queryRaw<[{ id: string }]>`
-      INSERT INTO "gsp_push_job" (
-        "force", "products_grid", "variation_tabs", "tabs_total", "run_by"
-      ) VALUES (
-        ${data.force},
-        ${JSON.stringify(data.productsGrid)}::jsonb,
-        ${JSON.stringify(data.variationTabs)}::jsonb,
-        ${data.variationTabs.length},
-        ${data.runBy}
-      )
+      INSERT INTO "gsp_push_job" ("force", "phase", "run_by")
+      VALUES (${data.force}, 'BUILD_PRODUCTS', ${data.runBy})
       RETURNING "id"
     `
     return rows[0]
@@ -99,6 +91,10 @@ export async function getPushJobStatus(id: string): Promise<PushJobStatus | null
 export type PushJobUpdate = {
   status?: PushJobStatus
   phase?: PushPhase
+  // Written by the two BUILD phases, once each.
+  productsGrid?: Cell[][]
+  variationTabs?: PushVariationTab[]
+  tabsTotal?: number
   tabsDone?: number
   writtenTitles?: string[]
   productsRows?: number
@@ -115,6 +111,9 @@ export async function updatePushJob(id: string, fields: PushJobUpdate): Promise<
   const sets: Prisma.Sql[] = [Prisma.sql`"updated_at" = CURRENT_TIMESTAMP`]
   if (fields.status !== undefined) sets.push(Prisma.sql`"status" = ${fields.status}`)
   if (fields.phase !== undefined) sets.push(Prisma.sql`"phase" = ${fields.phase}`)
+  if (fields.productsGrid !== undefined) sets.push(Prisma.sql`"products_grid" = ${JSON.stringify(fields.productsGrid)}::jsonb`)
+  if (fields.variationTabs !== undefined) sets.push(Prisma.sql`"variation_tabs" = ${JSON.stringify(fields.variationTabs)}::jsonb`)
+  if (fields.tabsTotal !== undefined) sets.push(Prisma.sql`"tabs_total" = ${fields.tabsTotal}`)
   if (fields.tabsDone !== undefined) sets.push(Prisma.sql`"tabs_done" = ${fields.tabsDone}`)
   if (fields.writtenTitles !== undefined) sets.push(Prisma.sql`"written_titles" = ${JSON.stringify(fields.writtenTitles)}::jsonb`)
   if (fields.productsRows !== undefined) sets.push(Prisma.sql`"products_rows" = ${fields.productsRows}`)

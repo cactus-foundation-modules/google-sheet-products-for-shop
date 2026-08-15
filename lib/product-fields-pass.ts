@@ -33,10 +33,11 @@ export async function applyProductFieldsPass(
   const productIds = new Set(matches.map((m) => m.productId).filter((id): id is string => !!id))
 
   // Let each provider preload its current state for every product in one go.
+  // Providers preload independently of one another, so they preload together.
   const ctx = new Map<string, unknown>()
-  for (const { id, provider } of providers) {
+  await Promise.all(providers.map(async ({ id, provider }) => {
     if (provider.beginImport) ctx.set(id, await provider.beginImport([...productIds]))
-  }
+  }))
 
   for (const match of matches) {
     if (!match.productId) continue // the engine could not match it either; its own error stands

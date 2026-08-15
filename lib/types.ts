@@ -108,6 +108,11 @@ export type PullJob = {
   varCreated: number
   varUpdated: number
   varDeleted: number
+  // How far through the stored deletion plan the DELETIONS phase has got. The
+  // plan is fixed at check time, so these index into it and a resumed step picks
+  // up at the same entry (see migrations/014).
+  prodDeletionsDone: number
+  varDeletionsDone: number
   prodErrors: SyncRowError[] | null
   varErrors: SyncRowError[] | null
   // Live commentary from the importers: the row being written right now, how
@@ -124,7 +129,10 @@ export type PullJob = {
 
 // --- Resumable Push job ----------------------------------------------------
 
-export type PushPhase = 'PRODUCTS' | 'VARIATION_TABS' | 'CLEANUP' | 'DONE'
+// BUILD_PRODUCTS and BUILD_TABS assemble the catalogue snapshot the later phases
+// write; they used to happen inside POST /push before it answered (see
+// migrations/013). Everything from PRODUCTS on is unchanged.
+export type PushPhase = 'BUILD_PRODUCTS' | 'BUILD_TABS' | 'PRODUCTS' | 'VARIATION_TABS' | 'CLEANUP' | 'DONE'
 export type PushJobStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
 // One variable product's tab: the stable slug it is matched by, the display name,
@@ -184,6 +192,11 @@ export type PullStatus = {
   productsDone: number
   variationsTotal: number
   variationsDone: number
+  // The removals stage has a cursor of its own now (see migrations/014), so it
+  // gets a bar of its own rather than a stage that looks stuck. Totals come from
+  // the headline counts, which survive the plan being cleared at the end.
+  deletionsTotal: number
+  deletionsDone: number
   // The row being written as this snapshot was taken, and the last few finished
   // (newest first) - what the dialog names while the bars move.
   currentItem: string | null
@@ -204,28 +217,99 @@ export type PullStatus = {
 // What a Pull is about to do, computed without writing anything. The preview
 // runs the same validation the engines apply, so the confirm dialog's counts
 // match what actually happens.
+//
+// Every list is CAPPED (see PREVIEW_LIST_CAP) with its true size kept beside it
+// as a `…Total`. A catalogue-wide edit would otherwise put tens of thousands of
+// entries in the job row and again in the response, for a dialog that shows the
+// first two dozen. Always read a count from the `…Total`; the array is only ever
+// the sample the dialog lists.
 export type PullPreview = {
   products: {
     toCreate: Array<{ sku: string | null; name: string }>
+    toCreateTotal: number
     toUpdate: Array<{ sku: string | null; name: string; changes: Array<{ field: string; from: string; to: string }> }>
+    toUpdateTotal: number
     // In the shop (non-hidden) but not in the sheet, and present as of the last
     // push. Pull deletes these outright, along with any variants they carry.
     toDelete: Array<{ id: string; sku: string | null; name: string }>
+    toDeleteTotal: number
     // Rows that match the shop cell-for-cell; the Pull skips them entirely.
     unchanged: number
     rowErrors: SyncRowError[]
+    rowErrorsTotal: number
   }
   variations: {
     toCreate: number
     // Which variation each changing row touches - parent product plus the
     // variant's option label (e.g. "Oak / 1600mm").
     toUpdate: Array<{ parentName: string; label: string }>
+    toUpdateTotal: number
     // On the site but absent from the sheet - Pull deletes these child products.
     toDelete: Array<{ childProductId: string; parentName: string; label: string }>
+    toDeleteTotal: number
     unchanged: number
     rowErrors: SyncRowError[]
+    rowErrorsTotal: number
   }
   staleness: { changedSinceLastPush: number; since: string | null }
   // Required Products columns the sheet header is missing (Pull will refuse).
   headerMissing: string[]
+}
+
+// --- Resumable Pull PREVIEW job --------------------------------------------
+
+export type PreviewPhase = 'READ' | 'PRODUCTS' | 'DELETIONS' | 'VARIATIONS' | 'DONE'
+export type PreviewJobStatus = 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+export type PreviewJob = {
+  id: string
+  status: PreviewJobStatus
+  phase: PreviewPhase
+  tabTitles: string[] | null
+  tabsTotal: number
+  tabsDone: number
+  rawTabs: string[][][] | null
+  driveModifiedTime: Date | null
+  productsGrid: string[][] | null
+  variationsGrid: string[][] | null
+  productsTotal: number
+  productsDone: number
+  variationsTotal: number
+  variationsDone: number
+  currentItem: string | null
+  preview: PullPreview | null
+  filteredProducts: string[][] | null
+  productsRowMap: number[] | null
+  filteredVariations: string[][] | null
+  variationsRowMap: number[] | null
+  deletionPlan: StoredDeletionPlan | null
+  detected: PullDetected | null
+  lastPushAt: Date | null
+  error: string | null
+  // True when the failure will never clear by trying again - a renamed product
+  // tab, a header with columns missing. Stops the browser's retry loop dead.
+  fatal: boolean
+  runBy: string | null
+  createdAt: Date
+}
+
+// The live snapshot the check dialog polls. `preview` only arrives once the job
+// has finished - a half-diffed catalogue would show counts that are simply wrong.
+export type PreviewStatus = {
+  previewJobId: string
+  status: PreviewJobStatus
+  phase: PreviewPhase
+  done: boolean
+  tabsTotal: number
+  tabsDone: number
+  productsTotal: number
+  productsDone: number
+  // Counted in parent products, not rows: a parent's variation rows are compared
+  // together, because that is how its options and variants load.
+  variationsTotal: number
+  variationsDone: number
+  currentItem: string | null
+  error: string | null
+  fatal: boolean
+  preview: PullPreview | null
 }

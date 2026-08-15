@@ -12,6 +12,8 @@ type Settings = {
   includeTradePrice: boolean
   lastPushAt: string | null
   lastPullAt: string | null
+  variationTabCount: number
+  busy: { push: boolean; pull: boolean; check: boolean }
   redirectUri: string | null
   siteOrigin: string | null
 }
@@ -26,6 +28,8 @@ const EMPTY: Settings = {
   includeTradePrice: true,
   lastPushAt: null,
   lastPullAt: null,
+  variationTabCount: 0,
+  busy: { push: false, pull: false, check: false },
   redirectUri: null,
   siteOrigin: null,
 }
@@ -73,6 +77,20 @@ function CopyField({ label, value }: { label: string; value: string }) {
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
+    </div>
+  )
+}
+
+// One line of the "where things stand" panel: a coloured dot, a label, and the
+// fact. The dot is the bit an owner reads first - three green ones and the sync
+// is set up, whatever the words say.
+function StatusLine({ ok, label, value, warn }: { ok: boolean; label: string; value: string; warn?: boolean }) {
+  const colour = warn ? 'var(--color-warning)' : ok ? 'var(--color-success)' : 'var(--color-text-muted)'
+  return (
+    <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'baseline', padding: '0.3rem 0' }}>
+      <span aria-hidden style={{ width: '0.55rem', height: '0.55rem', borderRadius: '999px', background: colour, flexShrink: 0, alignSelf: 'center' }} />
+      <span style={{ minWidth: '9rem' }}>{label}</span>
+      <span style={{ ...muted, fontSize: '0.875rem' }}>{value}</span>
     </div>
   )
 }
@@ -212,6 +230,13 @@ export function GoogleSheetSettingsTab() {
   }
 
   async function resetSheet() {
+    // A reset while something is mid-run points the sync at a blank workbook the
+    // running job knows nothing about - a push half-written to a sheet nobody is
+    // connected to any more, or a pull about to read tabs that no longer exist.
+    if (busyNow) {
+      setMessage('Something is running on the Products page right now. Let it finish (or stop it) before resetting the sheet.')
+      return
+    }
     if (!window.confirm('Create a fresh, blank sheet? The current one stays in your Google Drive but is disconnected from Cactus. Push again to refill the new one.')) return
     setBusy('reset')
     setMessage(null)
@@ -228,6 +253,9 @@ export function GoogleSheetSettingsTab() {
 
   if (loading) return null
 
+  const busyNow = settings.busy.push || settings.busy.pull || settings.busy.check
+  const setUp = settings.hasOAuthConnected && !!settings.spreadsheetId
+
   return (
     <div>
       <p style={{ ...muted, marginBottom: '1.5rem' }}>
@@ -238,10 +266,54 @@ export function GoogleSheetSettingsTab() {
 
       {message && <div className="card" style={{ marginBottom: '1rem' }}>{message}</div>}
 
-      {/* --- Google connection --- */}
+      {/* --- Where things stand ---
+          Four facts, in the order an owner needs them. It used to take reading
+          three cards and a paragraph to work out whether the sync was actually
+          set up, and there was nowhere at all that said something was running. */}
+      <div className="card" style={{ marginBottom: '1.5rem' }}>
+        <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Where things stand</div>
+        <StatusLine
+          ok={settings.hasOAuthConnected}
+          label="Google account"
+          value={settings.hasOAuthConnected
+            ? `Connected${settings.googleAccountEmail ? ` as ${settings.googleAccountEmail}` : ''}`
+            : settings.hasOAuthClient ? 'Credentials saved, not connected yet' : 'Not set up yet'}
+        />
+        <StatusLine
+          ok={!!settings.spreadsheetId}
+          label="The sheet"
+          value={settings.spreadsheetId
+            ? `Ready${settings.variationTabCount ? ` - ${settings.variationTabCount} product ${settings.variationTabCount === 1 ? 'tab' : 'tabs'} at the last push` : ''}`
+            : 'Not created yet'}
+        />
+        <StatusLine ok={!!settings.lastPushAt} label="Last push" value={fmt(settings.lastPushAt)} />
+        <StatusLine ok={!!settings.lastPullAt} label="Last pull" value={fmt(settings.lastPullAt)} />
+        {busyNow && (
+          <StatusLine
+            ok={false}
+            warn
+            label="Right now"
+            value={settings.busy.push ? 'A push is part-way through' : settings.busy.pull ? 'A pull is part-way through' : 'Your sheet is being checked'}
+          />
+        )}
+        {setUp && (
+          <p style={{ ...muted, fontSize: '0.8125rem', marginTop: '0.6rem', marginBottom: 0 }}>
+            Push, Pull and the sync log are on the <strong>Products</strong> page, under the <strong>Google Sheet</strong> button.
+            {settings.spreadsheetUrl && <> <a href={settings.spreadsheetUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>Open the sheet ↗</a></>}
+          </p>
+        )}
+      </div>
+
+      {/* --- Google connection ---
+          Once it is connected the six-step Google walkthrough is just noise, so
+          it folds away. It is still one click from here for a reconnect. */}
       <form onSubmit={saveClient} className="card" style={{ marginBottom: '1.5rem' }}>
         <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Google account</div>
-        <p style={{ ...muted, fontSize: '0.875rem', marginBottom: '0.75rem' }}>
+        <details open={!settings.hasOAuthConnected} style={{ marginBottom: '0.75rem' }}>
+          <summary style={{ cursor: 'pointer', fontSize: '0.875rem' }}>
+            {settings.hasOAuthConnected ? 'Setting this up again, or on another site' : 'How to set this up'}
+          </summary>
+        <p style={{ ...muted, fontSize: '0.875rem', margin: '0.75rem 0' }}>
           This is a one-off setup. You make your own free project in Google&rsquo;s console so the sheet lives in
           your Google Drive, under your control. Work through these steps in the{' '}
           <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" style={{ color: 'var(--color-primary)' }}>Google Cloud console</a>{' '}
@@ -274,6 +346,7 @@ export function GoogleSheetSettingsTab() {
           access expires after 7 days - which looks like &ldquo;it worked all week then stopped&rdquo;. With these
           scopes, publishing is one button and needs no Google review.
         </p>
+        </details>
         <div className="field">
           <label>
             Client ID {settings.hasOAuthClient && <span style={{ ...muted, fontWeight: 400 }}>(already set - leave blank to keep it)</span>}
@@ -346,15 +419,13 @@ export function GoogleSheetSettingsTab() {
           </button>
         ) : (
           <>
-            <p style={{ marginBottom: '0.75rem' }}>
-              Your sheet is set up. Push, Pull and the sync log are on the{' '}
-              <strong>Products</strong> page - look for the <strong>Google Sheet</strong> button.
-            </p>
-            <button type="button" className="btn btn-secondary" onClick={resetSheet} disabled={!!busy}>
+            <button type="button" className="btn btn-secondary" onClick={resetSheet} disabled={!!busy || busyNow}>
               {busy === 'reset' ? 'Resetting…' : 'Reset sheet'}
             </button>
-            <p style={{ ...muted, fontSize: '0.8125rem', marginTop: '0.75rem' }}>
-              Last push: {fmt(settings.lastPushAt)} · Last pull: {fmt(settings.lastPullAt)}
+            <p style={{ ...muted, fontSize: '0.8125rem', marginTop: '0.75rem', marginBottom: 0 }}>
+              {busyNow
+                ? 'Not while something is running - let the push, pull or check on the Products page finish first.'
+                : 'Starts again with an empty workbook. The old one stays in your Google Drive; nothing on your website is touched.'}
             </p>
           </>
         )}

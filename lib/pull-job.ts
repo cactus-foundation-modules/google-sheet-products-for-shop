@@ -45,6 +45,8 @@ function mapJob(r: Record<string, unknown>): PullJob {
     varCreated: r.var_created as number,
     varUpdated: r.var_updated as number,
     varDeleted: r.var_deleted as number,
+    prodDeletionsDone: (r.prod_deletions_done as number | undefined) ?? 0,
+    varDeletionsDone: (r.var_deletions_done as number | undefined) ?? 0,
     prodErrors: asErrors(r.prod_errors),
     varErrors: asErrors(r.var_errors),
     currentItem: (r.current_item as string | null) ?? null,
@@ -142,6 +144,8 @@ export type PullJobUpdate = {
   varCreated?: number
   varUpdated?: number
   varDeleted?: number
+  prodDeletionsDone?: number
+  varDeletionsDone?: number
   prodErrors?: SyncRowError[]
   varErrors?: SyncRowError[]
   currentItem?: string | null
@@ -166,6 +170,8 @@ export async function updatePullJob(id: string, fields: PullJobUpdate): Promise<
   if (fields.varCreated !== undefined) sets.push(Prisma.sql`"var_created" = ${fields.varCreated}`)
   if (fields.varUpdated !== undefined) sets.push(Prisma.sql`"var_updated" = ${fields.varUpdated}`)
   if (fields.varDeleted !== undefined) sets.push(Prisma.sql`"var_deleted" = ${fields.varDeleted}`)
+  if (fields.prodDeletionsDone !== undefined) sets.push(Prisma.sql`"prod_deletions_done" = ${fields.prodDeletionsDone}`)
+  if (fields.varDeletionsDone !== undefined) sets.push(Prisma.sql`"var_deletions_done" = ${fields.varDeletionsDone}`)
   if (fields.prodErrors !== undefined) sets.push(Prisma.sql`"prod_errors" = ${fields.prodErrors.length ? JSON.stringify(fields.prodErrors) : null}::jsonb`)
   if (fields.varErrors !== undefined) sets.push(Prisma.sql`"var_errors" = ${fields.varErrors.length ? JSON.stringify(fields.varErrors) : null}::jsonb`)
   if (fields.currentItem !== undefined) sets.push(Prisma.sql`"current_item" = ${fields.currentItem}`)
