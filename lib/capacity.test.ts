@@ -42,17 +42,18 @@ function plan(over: Partial<TabPushPlan> & { tab: string }): TabPushPlan {
 }
 
 describe('tab sizing', () => {
-  it('gives a tab room to grow without handing it Google\'s blank default', () => {
-    // A 40-variant product: 41 rows of content, not 1000, and a screenful of
-    // blank underneath rather than nine hundred rows of it.
-    expect(targetRows(41)).toBe(61)
-    expect(targetColumns(20)).toBe(22)
-    // A tiny tab still gets a usable floor.
-    expect(targetRows(2)).toBe(MIN_ROWS)
-    expect(targetColumns(1)).toBe(MIN_COLUMNS)
-    // A big one is sized to fit, not to a fixed cap.
-    expect(targetRows(21_400)).toBe(21_420)
-    expect(targetColumns(45)).toBe(47)
+  it('sizes a tab to its contents exactly, with nothing spare', () => {
+    // A 40-variant product: 41 rows, not 1000 and not 61 either. No blank rows
+    // underneath and no blank columns beside - a tab that gains a variation is
+    // grown by the resize pass instead (see below).
+    expect(targetRows(41)).toBe(41)
+    expect(targetColumns(20)).toBe(20)
+    // The floors are Sheets' smallest grid, not padding.
+    expect(targetRows(1)).toBe(MIN_ROWS)
+    expect(targetColumns(0)).toBe(MIN_COLUMNS)
+    // Nothing is capped at the top end either.
+    expect(targetRows(21_400)).toBe(21_400)
+    expect(targetColumns(45)).toBe(45)
   })
 
   it('costs a fraction of what Google\'s default costs', () => {
@@ -158,11 +159,20 @@ describe('resizeRequests', () => {
     })
   })
 
-  it('never grows a tab', () => {
+  it('grows a tab too small for the grid about to be written', () => {
+    // The reason zero slack is safe. This product has gained variations since
+    // the last Push and its tab has nowhere to put them; the grid is stretched
+    // in the same batch, ahead of the write, rather than hoping the write does it.
+    const plans = [plan({ tab: 'Alpha', grid: Array.from({ length: 41 }, () => Array(20).fill('x')) })]
+    const old: Record<string, SheetCell[][]> = { Alpha: Array.from({ length: 12 }, () => row(20)) }
+    const requests = resizeRequests(plans, old, { Alpha: grid(7, 12, 20) }) as ResizeRequest[]
+    expect(requests[0]!.updateSheetProperties.properties.gridProperties).toEqual({ rowCount: 41 })
+  })
+
+  it('emits nothing for a tab that is already exactly right', () => {
     const plans = [plan({ tab: 'Alpha', grid: Array.from({ length: 41 }, () => Array(20).fill('x')) })]
     const old: Record<string, SheetCell[][]> = { Alpha: Array.from({ length: 41 }, () => row(20)) }
-    // Already snug: the targets are bigger than the tab, so nothing is emitted.
-    expect(resizeRequests(plans, old, { Alpha: grid(7, 50, 22) })).toEqual([])
+    expect(resizeRequests(plans, old, { Alpha: grid(7, 41, 20) })).toEqual([])
   })
 
   it('accounts for the inserts and deletes queued ahead of it in the same batch', () => {
@@ -176,13 +186,10 @@ describe('resizeRequests', () => {
     })]
     const old: Record<string, SheetCell[][]> = { Alpha: Array.from({ length: 71 }, () => row(20)) }
     const requests = resizeRequests(plans, old, { Alpha: grid(7, 120, 24) }) as ResizeRequest[]
-    // Used rows are 41 once the 30 doomed ones have gone, so the target is 61 -
-    // a shrink against the 90 rows that will be left, which is the figure that
-    // matters rather than the 120 the size was read at.
-    // Columns are the discriminating half: the insert takes the tab to 28, so
-    // the target of 26 IS a shrink. Ignore the queued insert and you read the
-    // width as 24, conclude there is nothing to do, and leave the tab wide.
-    expect(requests[0]!.updateSheetProperties.properties.gridProperties).toEqual({ rowCount: 61, columnCount: 26 })
+    // Used rows are 41 once the 30 doomed ones have gone, against the 90 that
+    // will be left - which is the figure that matters, not the 120 the size was
+    // read at. Columns: the insert takes the tab to 28 and the content to 24.
+    expect(requests[0]!.updateSheetProperties.properties.gridProperties).toEqual({ rowCount: 41, columnCount: 24 })
   })
 
   it('leaves a tab alone when the sheet no longer has it', () => {

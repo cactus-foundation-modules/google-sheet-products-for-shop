@@ -28,22 +28,26 @@ export const WORKBOOK_CELL_LIMIT = 10_000_000
 // not own and must never resize.
 export const CELL_BUDGET = 9_000_000
 
-// Room left on a tab beyond what the catalogue fills, so the owner can type a
-// row or two without a Push having to grow the grid first.
+// NO slack. A tab is exactly as big as the thing in it.
 //
-// Kept DELIBERATELY tight. The first version of this left 50 spare rows and a
-// floor of 100, which is defensible arithmetic and reads, on the screen, as "it
-// is still making tabs full of blank cells" - because from the owner's side a
-// forty-row product on a hundred-row tab looks exactly like the fault we set out
-// to fix. Slack is not free comfort: it is the visible bottom half of every tab
-// they open. A tab that runs short costs nothing anyway - writing past the last
-// row grows the grid on its own - so the slack only has to cover typing by hand.
+// This started at 50 spare rows with a floor of 100, went to 20 and 30, and both
+// times the answer from the other side of the screen was the same: those are
+// still blank cells, and blank cells are the fault we set out to fix. There is
+// no arithmetic that makes a visible empty half-tab feel deliberate, so the
+// slack is gone. A twenty-variation product gets twenty-one rows.
 //
-// A 60-variant product tab now lands at 81 rows by about 22 columns.
-export const ROW_SLACK = 20
-export const MIN_ROWS = 30
-export const COLUMN_SLACK = 2
-export const MIN_COLUMNS = 8
+// What makes zero safe is that the resize pass GROWS as well as shrinks (see
+// resizeRequests): the grid is set to fit the grid about to be written, in the
+// same atomic batch, before the write goes anywhere near it. Leaving spare rows
+// as insurance against a product gaining a variation was always the wrong tool -
+// sizing the tab correctly is the right one.
+//
+// The floors are the smallest grid Sheets will hold, not a judgement: a product
+// tab is a header and at least one variant, so it never reaches them anyway.
+export const ROW_SLACK = 0
+export const MIN_ROWS = 2
+export const COLUMN_SLACK = 0
+export const MIN_COLUMNS = 1
 
 // The width the three fixed tabs are born with, from spreadsheets.create. Not a
 // judgement about content - Google's own default, left alone so a brand-new

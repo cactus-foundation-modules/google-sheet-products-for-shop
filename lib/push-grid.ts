@@ -227,13 +227,18 @@ export function planTabPush(input: TabPushInput, oldGridIn: SheetCell[][]): TabP
  * by 45 columns to hold forty variants is 44,000 blank cells, and a few hundred
  * of those is a workbook that refuses to grow another tab (see lib/capacity.ts).
  *
- * This is the one place that can trim safely, because the batched pre-read has
- * just returned each tab's REAL used extent - the owner's own columns and rows
- * included, since values.get returns everything anyone has put in the tab, not
- * only what this module wrote. The target is that extent plus slack.
+ * This is the one place that can size a tab safely, because the batched pre-read
+ * has just returned each tab's REAL used extent - the owner's own columns and
+ * rows included, since values.get returns everything anyone has put in the tab,
+ * not only what this module wrote. The target is that extent.
  *
- * Shrink only. Growing is left to the write itself, which extends a tab as
- * needed; a resize that grew a tab could only ever undo the point of the pass.
+ * It grows as well as shrinks, and the growing half is what lets the tabs carry
+ * no spare rows at all. A tab sized exactly to its contents has nowhere to put a
+ * variation the product has just gained, so the grid is stretched to fit the grid
+ * about to be written - in this same atomic batch, ahead of the write. Trusting
+ * the write to extend the tab by itself would be the cheaper-looking option and a
+ * guess about someone else's API; this is a fact.
+ *
  * The current size accounts for the inserts and deletes queued ahead of it in the
  * same batch, because those have not been applied when `grids` was read.
  */
@@ -259,8 +264,8 @@ export function resizeRequests(
     const columnCount = targetColumns(usedColumns)
     const fields: string[] = []
     const gridProperties: { rowCount?: number; columnCount?: number } = {}
-    if (rowCount < currentRows) { gridProperties.rowCount = rowCount; fields.push('gridProperties.rowCount') }
-    if (columnCount < currentColumns) { gridProperties.columnCount = columnCount; fields.push('gridProperties.columnCount') }
+    if (rowCount !== currentRows) { gridProperties.rowCount = rowCount; fields.push('gridProperties.rowCount') }
+    if (columnCount !== currentColumns) { gridProperties.columnCount = columnCount; fields.push('gridProperties.columnCount') }
     if (fields.length === 0) continue
 
     requests.push({
