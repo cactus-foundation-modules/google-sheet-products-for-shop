@@ -26,6 +26,13 @@ const PARENT_COUNT = 350
 let now = 1_700_000_000_000
 const advance = (ms: number) => { now += ms }
 
+// What the products phase's setup costs. Live, this was measured at 150 seconds
+// against a 30-second budget, which is what "Products compared - 0 of 445" was:
+// the loop asked whether there was budget left before its first pass, there never
+// was, and every step repeated the same setup to achieve the same nothing. One
+// test below turns this up past the budget deliberately.
+let productSetupCostMs = 2_000
+
 // --- the in-memory job row, standing in for gsp_preview_job -----------------
 
 let job: PreviewJob
@@ -43,7 +50,7 @@ function freshJob(): PreviewJob {
     currentItem: null, preview: null,
     filteredProducts: null, productsRowMap: null, filteredVariations: null, variationsRowMap: null,
     deletionPlan: null, detected: null, lastPushAt: null,
-    error: null, fatal: false, runBy: 'admin', createdAt: new Date(now),
+    error: null, fatal: false, runBy: 'admin', createdAt: new Date(now), updatedAt: new Date(now),
   }
 }
 
@@ -66,6 +73,9 @@ vi.mock('@/modules/google-sheet-products-for-shop/lib/preview-job', () => ({
   }),
   claimPreviewStepLease: vi.fn(async () => new Date(now)),
   releasePreviewStepLease: vi.fn(async () => {}),
+  // Says "still alive" before a long setup. Writes nothing else, so the fake can
+  // be a no-op - but it must EXIST, or every step dies on an undefined call.
+  heartbeatPreviewJob: vi.fn(async () => {}),
 }))
 
 // The finalise claim is the one place the runner reaches for raw SQL directly.
@@ -140,7 +150,7 @@ vi.mock('@/modules/google-sheet-products-for-shop/lib/pull-diff', async (importO
   return {
     ...actual, // keptRowsFromResults is pure and stays real
     prepareProductDiff: vi.fn(async (grid: string[][]) => {
-      advance(2_000) // the catalogue load - the expensive setup a step pays once
+      advance(productSetupCostMs) // the catalogue load - the setup a step pays before it can compare anything
       return { grid, rowCount: Math.max(grid.length - 1, 0) }
     }),
     diffProductRowRange: vi.fn(async (ctx: { grid: string[][] }, from: number, to: number) => {
@@ -189,16 +199,18 @@ vi.mock('@/modules/shop-variations/lib/db/variants', () => ({
 import { stepPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-run'
 
 // Drive the job the way the browser does, and record what each step achieved.
-async function runToCompletion(maxSteps = 200): Promise<{ steps: number; phases: string[] }> {
+async function runToCompletion(maxSteps = 200, stepCeilingMs = 40_000): Promise<{ steps: number; phases: string[] }> {
   const phases: string[] = []
   for (let i = 0; i < maxSteps; i++) {
     const before = now
     const status = await stepPreviewJob('job-1')
     phases.push(`${status?.phase}`)
     // No step may run past the dispatcher's ceiling. The budget is 30s; the
-    // slowest single unit of faked work is ~2.5s, so 40s is a generous ceiling
-    // that still fails loudly if a phase ever stops checking the clock.
-    expect(now - before).toBeLessThan(40_000)
+    // slowest single unit of faked work is ~2.5s, so 40s is a generous default
+    // that still fails loudly if a phase ever stops checking the clock. The
+    // slow-setup test raises it to the platform's real 60s limit, which is the
+    // figure that actually matters there.
+    expect(now - before).toBeLessThan(stepCeilingMs)
     if (status?.done || status?.status === 'CANCELLED' || status?.status === 'FAILED') {
       return { steps: i + 1, phases }
     }
@@ -209,6 +221,7 @@ async function runToCompletion(maxSteps = 200): Promise<{ steps: number; phases:
 describe('the sheet check, driven step by step at a real catalogue size', () => {
   beforeEach(() => {
     now = 1_700_000_000_000
+    productSetupCostMs = 2_000
     job = freshJob()
     writeCount = 0
     swallowNextWrite = false
@@ -293,6 +306,72 @@ describe('the sheet check, driven step by step at a real catalogue size', () => 
     await stepPreviewJob('job-1')
     expect(writeCount).toBe(writesBefore)
     expect(job.status).toBe('CANCELLED')
+  })
+
+  // The regression test for the live fault. Chris's dialog sat on "Products
+  // compared - 0 of 445" while the clock ran, because the phase's setup had grown
+  // past the step budget and the compare loop was never entered. A step must
+  // land at least one chunk when there is still room in the request to land it.
+  it('still makes progress when the setup outlasts the step budget but fits the request', async () => {
+    productSetupCostMs = 30_000 // past the 20s budget, still inside the 60s ceiling
+
+    const { steps } = await runToCompletion(400, 60_000)
+
+    expect(job.status).toBe('COMPLETED')
+    // The bar moved off zero and reached the end - the phase was not merely slow,
+    // it finished. Before the guarantee this looped for ever at productsDone 0.
+    expect(job.productsDone).toBe(PRODUCT_ROWS)
+    expect(job.variationsDone).toBe(PARENT_COUNT)
+    expect(steps).toBeGreaterThan(3)
+    const p = job.preview!.products
+    expect(p.toUpdateTotal + p.unchanged + p.toCreateTotal + p.rowErrorsTotal).toBe(PRODUCT_ROWS)
+  })
+
+  // The other side of that contract. If setup eats so much of the request that a
+  // chunk could not possibly land its cursor, starting one anyway just gets the
+  // step killed mid-work - so it stops and SAYS so. Silence here is what a wedged
+  // job looks like from the outside, and that is the thing to never ship again.
+  it('fails loudly rather than looping when the setup leaves no room at all', async () => {
+    productSetupCostMs = 50_000 // past the ceiling less its margin: no room for a chunk
+
+    // Step until it gives up, however many steps the read takes first.
+    let status = await stepPreviewJob('job-1')
+    for (let i = 0; i < 20 && status?.status !== 'FAILED'; i++) status = await stepPreviewJob('job-1')
+
+    expect(status?.status).toBe('FAILED')
+    expect(status?.error).toMatch(/no time left to compare/i)
+    expect(job.productsDone).toBe(0)
+  })
+
+  it('carries on from its cursor after being stopped part-way', async () => {
+    // Step until the products compare has actually banked something, however
+    // many steps that takes - the chunk sizes are tuning, not contract.
+    for (let i = 0; i < 20 && job.productsDone === 0; i++) await stepPreviewJob('job-1')
+    const stoppedAt = job.productsDone
+    expect(stoppedAt).toBeGreaterThan(0)
+    const gridsBefore = job.productsGrid
+
+    // Exactly what the idle sweep now does: mark it stopped, keep everything.
+    job.status = 'FAILED'
+    job.error = 'The check stopped part-way through.'
+
+    // Its place and its working copy both survive - the two things that made the
+    // live one unrecoverable when the sweep cancelled and gutted it instead.
+    expect(job.productsDone).toBe(stoppedAt)
+    expect(job.productsGrid).toBe(gridsBefore)
+
+    // Stepping it again picks up rather than restarting.
+    const next = await stepPreviewJob('job-1')
+    expect(next?.productsDone).toBeGreaterThanOrEqual(stoppedAt)
+    expect(next?.tabsDone).toBe(TAB_COUNT) // the read is not done twice
+
+    const { steps } = await runToCompletion()
+    expect(steps).toBeGreaterThan(0)
+    expect(job.status).toBe('COMPLETED')
+    expect(job.productsDone).toBe(PRODUCT_ROWS)
+    const p = job.preview!.products
+    // Nothing counted twice by the resume.
+    expect(p.toUpdateTotal + p.unchanged + p.toCreateTotal + p.rowErrorsTotal).toBe(PRODUCT_ROWS)
   })
 
   it('writes the heavy columns a handful of times, not once per chunk', async () => {

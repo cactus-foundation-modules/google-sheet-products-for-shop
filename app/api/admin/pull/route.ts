@@ -14,7 +14,10 @@ import type { PullDetected, PreviewJob, StoredDeletionPlan } from '@/modules/goo
 // pressed seconds after the dialog lists what it will do; a dialog left open over
 // lunch is re-checked rather than trusted, because the catalogue may have moved
 // underneath it in the meantime.
-const PREVIEW_MAX_AGE_MS = 15 * 60_000
+// How long a FINISHED check may sit before a Pull stops trusting it. Measured
+// from when it finished, not when it started - see below, because getting that
+// wrong is what made the owner sit through the whole comparison twice.
+const PREVIEW_MAX_AGE_MS = 30 * 60_000
 
 // The same, for the awkward case where Drive will not say when the sheet was
 // last touched - it answers null rather than failing, and has been known to. With
@@ -159,7 +162,14 @@ async function adoptPreview(previewJobId: string, spreadsheetId: string): Promis
   if (!job.filteredProducts || !job.filteredVariations || !job.detected) return null
   if ((job.preview?.headerMissing.length ?? 0) > 0) return null
 
-  const age = Date.now() - job.createdAt.getTime()
+  // Age from when the check FINISHED. It used to be measured from when the check
+  // STARTED, and that single word is why every Pull re-ran the whole comparison:
+  // a check of this catalogue takes about a quarter of an hour, the window was a
+  // quarter of an hour, so by the time the owner had a summary in front of them
+  // to press Pull on, their brand-new answer was already "too old to trust" and
+  // the work was thrown away and done again. The time a check spends working is
+  // not time its answer has spent going stale.
+  const age = Date.now() - job.updatedAt.getTime()
   const modifiedAt = await getSheetModifiedTime(spreadsheetId).catch(() => null)
 
   if (job.driveModifiedTime) {

@@ -17,7 +17,8 @@ import {
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import {
-  getPreviewJob, getPreviewJobStatus, updatePreviewJob, claimPreviewStepLease, releasePreviewStepLease,
+  getPreviewJob, getPreviewJobStatus, updatePreviewJob, heartbeatPreviewJob,
+  claimPreviewStepLease, releasePreviewStepLease,
 } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 import type {
   PreviewJob, PreviewStatus, PullPreview, PullDetected, SyncRowError,
@@ -34,17 +35,28 @@ import type {
 // The finished job carries the filtered grids, the row maps and the deletion
 // plan, so POST /pull adopts them rather than doing the whole sweep again.
 
-// How long one step keeps starting new chunks. Well under the module
-// dispatcher's 60s ceiling so the slowest single chunk still finishes and banks
-// its cursor before the platform kills the request. Same figure as Pull and Push.
-const STEP_TIME_BUDGET_MS = 30_000
+// The platform kills a module route at sixty seconds. That is not a target to
+// aim just under; it is a cliff, and a step that lands at 55s on a good day goes
+// over on a slow one - which is what a run of 500/504s on this route during an
+// otherwise idle period turned out to be.
+const MODULE_ROUTE_CEILING_MS = 60_000
+
+// How long one step keeps STARTING new chunks. The gap to the ceiling is the
+// room the chunk already in flight has to finish in, so it is deliberately large:
+// twenty seconds of starting work, forty seconds of headroom to finish it. Being
+// stingy here buys nothing - a step that stops early just means the browser asks
+// for another one, which costs a round trip, where overrunning costs the whole
+// step and a 504 in the owner's monitoring.
+const STEP_TIME_BUDGET_MS = 20_000
 
 // How long a claimed step lease lasts before another worker may take over.
 const STEP_LEASE_MS = 90_000
 
 // Products rows compared between cursor writes. The comparison itself is in
-// memory; this is only how often the bar moves and how much a killed step redoes.
-const PRODUCT_ROW_CHUNK = 50
+// memory now that both contributing modules preload in batches - a chunk of 150
+// measured at well under a second - so this is only how often the bar moves and
+// how much a killed step has to redo. It was 50 when each row cost a round trip.
+const PRODUCT_ROW_CHUNK = 150
 
 // Parent products compared between cursor writes. Each one loads its
 // contributing modules' state, so the chunk is smaller than the products one.
@@ -62,6 +74,36 @@ const PARENT_CHUNK = 12
 // separately: a step killed between two banks simply redoes the chunks since the
 // last one, which costs a few seconds and is read-only anyway.
 const BANK_INTERVAL_MS = 5_000
+
+// Margin before the platform's ceiling inside which it is not worth STARTING the
+// guaranteed chunk. Past this the request is about to be killed, so the chunk
+// could not land its cursor anyway - beginning it would burn the work twice over.
+const CHUNK_START_MARGIN_MS = 15_000
+
+// A step must normally finish at least ONE chunk, whatever the budget clock says.
+// A phase whose setup outgrows the budget would otherwise never enter its loop,
+// never move its cursor, and be repeated identically by every step that followed
+// - a job that cannot finish rather than one that is merely slow. That is what
+// "Products compared - 0 of 445" was.
+//
+// The one exception is the ceiling: if setup has already eaten so much of the
+// sixty seconds that a chunk cannot land, the step gives up cleanly instead of
+// being killed mid-chunk. The callers treat "did nothing at all" as an error
+// worth showing, so that case surfaces rather than looping in silence.
+function mayStartChunk(chunksDone: number, startedAt: number): boolean {
+  const elapsed = Date.now() - startedAt
+  if (chunksDone === 0) return elapsed < MODULE_ROUTE_CEILING_MS - CHUNK_START_MARGIN_MS
+  return elapsed < STEP_TIME_BUDGET_MS
+}
+
+// What a phase says when its setup alone has used up the request. Loud on
+// purpose: silence here is what a wedged job looks like from the outside.
+function setupTooSlow(what: string): Error {
+  return new Error(
+    `Loading your ${what} took so long that there was no time left to compare anything. ` +
+    'This usually clears on its own - if it keeps happening, your catalogue has outgrown what one pass can do.',
+  )
+}
 
 // How many entries any one list in the preview keeps. The dialog shows the first
 // couple of dozen and a "…and N more"; a catalogue-wide edit would otherwise put
@@ -269,16 +311,23 @@ async function runReadPhase(job: PreviewJob, spreadsheetId: string, startedAt: n
   let done = job.tabsDone
   const raw = job.rawTabs ?? []
   let lastBankAt = Date.now()
-  while (done < titles.length && Date.now() - startedAt < STEP_TIME_BUDGET_MS) {
+  let groupsDone = 0
+  while (done < titles.length && mayStartChunk(groupsDone, startedAt)) {
     if ((await getPreviewJobStatus(job.id)) === 'CANCELLED') return
     // Group boundaries are decided from the remaining tabs, so they are the same
     // whichever step picks up here - a re-run group is the same group.
     const group = batchGetGroups(titles.slice(done))[0] ?? []
     if (group.length === 0) break
     raw.push(...await readTabGroup(spreadsheetId, group))
+    groupsDone++
     done += group.length
     const currentItem = group[group.length - 1] ?? null
-    if (done >= titles.length || Date.now() - lastBankAt >= BANK_INTERVAL_MS) {
+    // Bank when the phase is finished, when the bank clock says so, OR when this
+    // step is about to end - the last chunk of a step must never be left
+    // un-banked. It is the same write either way; what matters is that the cursor
+    // and the work it accounts for reach the database before the step returns.
+    const willContinue = done < titles.length && mayStartChunk(groupsDone, startedAt)
+    if (!willContinue || Date.now() - lastBankAt >= BANK_INTERVAL_MS) {
       await updatePreviewJob(job.id, { tabsDone: done, rawTabs: raw, status: 'RUNNING', error: null, currentItem })
       lastBankAt = Date.now()
     } else {
@@ -294,6 +343,10 @@ async function runProductsPhase(job: PreviewJob, startedAt: number): Promise<voi
   const grid = job.productsGrid
   if (!grid) throw new Error('The check lost its copy of the Products tab. Start it again.')
   const preview = job.preview ?? emptyPreview()
+  // Say we are alive before the long bit. Loading the catalogue to compare
+  // against writes nothing until its first chunk lands, and a job that writes
+  // nothing looks abandoned to the idle sweep however hard it is working.
+  await heartbeatPreviewJob(job.id)
   const ctx = await prepareProductDiff(grid)
 
   let cursor = job.productsDone
@@ -302,11 +355,13 @@ async function runProductsPhase(job: PreviewJob, startedAt: number): Promise<voi
   let currentItem = job.currentItem
   let lastBankAt = Date.now()
 
-  while (cursor < ctx.rowCount && Date.now() - startedAt < STEP_TIME_BUDGET_MS) {
+  let chunksDone = 0
+  while (cursor < ctx.rowCount && mayStartChunk(chunksDone, startedAt)) {
     if ((await getPreviewJobStatus(job.id)) === 'CANCELLED') return
     const from = cursor + 1 // grid row index: data rows start at 1
     const to = Math.min(from + PRODUCT_ROW_CHUNK, grid.length)
     const results = await diffProductRowRange(ctx, from, to, (name) => { currentItem = name || currentItem })
+    chunksDone++
 
     for (const r of results) {
       if (r.kind === 'error') {
@@ -327,7 +382,8 @@ async function runProductsPhase(job: PreviewJob, startedAt: number): Promise<voi
     rowMap.push(...kept.sheetRows)
 
     cursor = to - 1
-    if (cursor >= ctx.rowCount || Date.now() - lastBankAt >= BANK_INTERVAL_MS) {
+    const willContinue = cursor < ctx.rowCount && mayStartChunk(chunksDone, startedAt)
+    if (!willContinue || Date.now() - lastBankAt >= BANK_INTERVAL_MS) {
       await updatePreviewJob(job.id, {
         status: 'RUNNING', error: null, productsDone: cursor, preview,
         filteredProducts: keptRows, productsRowMap: rowMap, currentItem,
@@ -342,6 +398,8 @@ async function runProductsPhase(job: PreviewJob, startedAt: number): Promise<voi
   // Products tab with no data rows at all never enters the loop above, so nothing
   // else would ever write them - and while that is only a header row here, the
   // variations phase has the same shape and real rows to lose (see below).
+  if (chunksDone === 0 && cursor < ctx.rowCount) throw setupTooSlow('catalogue')
+
   if (cursor >= ctx.rowCount) {
     await updatePreviewJob(job.id, {
       phase: 'DELETIONS', status: 'RUNNING', error: null, currentItem: null,
@@ -360,8 +418,20 @@ async function runDeletionsPhase(job: PreviewJob): Promise<void> {
 
   // Both bulk queries: one paged catalogue read and one batched load of every
   // variable parent's variants. Nothing here is per-row, so the phase is a single
-  // bounded slice with no cursor of its own.
-  const plan = await planPullDeletions(productsGrid, variationsGrid, job.lastPushAt)
+  // bounded slice with no cursor of its own - and therefore writes nothing until
+  // it is done, which is exactly when a heartbeat is needed.
+  await heartbeatPreviewJob(job.id)
+  // Narrated, because this phase has no per-row cursor and so no bar. Each step
+  // of it is a bulk query; naming the one in flight is the difference between
+  // "it is working" and a clock ticking upwards over nothing.
+  let lastSaid = 0
+  const plan = await planPullDeletions(productsGrid, variationsGrid, job.lastPushAt, undefined, (what) => {
+    // Fire and forget, and no more often than the dialog polls - the point is a
+    // moving line, not a faithful log.
+    if (Date.now() - lastSaid < 900) return
+    lastSaid = Date.now()
+    void updatePreviewJob(job.id, { currentItem: what }).catch(() => {})
+  })
 
   preview.products.toDeleteTotal = plan.products.length
   preview.products.toDelete = []
@@ -384,6 +454,7 @@ async function runVariationsPhase(job: PreviewJob, startedAt: number): Promise<v
   const grid = job.variationsGrid
   if (!grid) throw new Error('The check lost its copy of your product tabs. Start it again.')
   const preview = job.preview ?? emptyPreview()
+  await heartbeatPreviewJob(job.id)
   const ctx = await prepareVariationDiff(grid)
 
   let cursor = job.variationsDone
@@ -408,10 +479,12 @@ async function runVariationsPhase(job: PreviewJob, startedAt: number): Promise<v
     await updatePreviewJob(job.id, { variationsTotal: ctx.groups.length })
   }
 
-  while (cursor < ctx.groups.length && Date.now() - startedAt < STEP_TIME_BUDGET_MS) {
+  let chunksDone = 0
+  while (cursor < ctx.groups.length && mayStartChunk(chunksDone, startedAt)) {
     if ((await getPreviewJobStatus(job.id)) === 'CANCELLED') return
     const to = Math.min(cursor + PARENT_CHUNK, ctx.groups.length)
     const results = await diffVariationGroupRange(ctx, cursor, to, (name) => { currentItem = name || currentItem })
+    chunksDone++
 
     for (const r of results) {
       if (r.kind === 'error') {
@@ -437,7 +510,8 @@ async function runVariationsPhase(job: PreviewJob, startedAt: number): Promise<v
     rowMap.push(...kept.sheetRows)
 
     cursor = to
-    if (cursor >= ctx.groups.length || Date.now() - lastBankAt >= BANK_INTERVAL_MS) {
+    const willContinue = cursor < ctx.groups.length && mayStartChunk(chunksDone, startedAt)
+    if (!willContinue || Date.now() - lastBankAt >= BANK_INTERVAL_MS) {
       await updatePreviewJob(job.id, {
         status: 'RUNNING', error: null, variationsDone: cursor, variationsTotal: ctx.groups.length,
         preview, filteredVariations: keptRows, variationsRowMap: rowMap, currentItem,
@@ -453,6 +527,8 @@ async function runVariationsPhase(job: PreviewJob, startedAt: number): Promise<v
   // parent groups, so the loop never runs. Closing the phase without this write
   // would throw away every one of those row errors and the rows that carry them,
   // and the dialog would report a sheet with nothing wrong with it.
+  if (chunksDone === 0 && cursor < ctx.groups.length) throw setupTooSlow('variations')
+
   if (cursor >= ctx.groups.length) {
     await updatePreviewJob(job.id, {
       phase: 'DONE', status: 'RUNNING', error: null, currentItem: null,

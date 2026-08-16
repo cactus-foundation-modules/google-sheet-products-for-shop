@@ -379,7 +379,11 @@ function PullModal({ resumable, onClose, onResumableChange }: {
 
   // Kick off (or rejoin) a check of the sheet.
   const startingCheck = useRef(false)
-  const runCheck = useCallback(async () => {
+  // `fresh` is the owner explicitly choosing to throw away a part-finished check
+  // and start at the first tab again. The default is always to carry on: a check
+  // that got most of the way through a big catalogue and then stopped must not
+  // lose that work to the button offered to continue it.
+  const runCheck = useCallback(async (opts?: { fresh?: boolean }) => {
     if (startingCheck.current) return
     startingCheck.current = true
     setCheckStarting(true)
@@ -388,7 +392,11 @@ function PullModal({ resumable, onClose, onResumableChange }: {
     check.setError(null)
     check.allowRestart()
     try {
-      const res = await fetch(`${BASE}/pull/preview`, { method: 'POST' })
+      const res = await fetch(`${BASE}/pull/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fresh: opts?.fresh === true }),
+      })
       const body = await res.json().catch(() => ({}))
       if (!res.ok || !body.previewJobId) { setStartErr(failureText(res, body, 'Could not check your sheet.')); return }
       setPreviewJobId(body.previewJobId)
@@ -526,6 +534,9 @@ function PullModal({ resumable, onClose, onResumableChange }: {
     const failed = s?.status === 'FAILED'
     const cancelled = s?.status === 'CANCELLED'
     const busy = check.working || checkStarting
+    // Did it get anywhere before it stopped? If so, the work is still on the job
+    // and carrying on is a real option rather than a polite fiction.
+    const hasProgress = !!s && !busy && (s.productsDone > 0 || s.variationsDone > 0 || s.tabsDone > 0)
     return (
       <Modal
         title="Pull from sheet"
@@ -536,6 +547,19 @@ function PullModal({ resumable, onClose, onResumableChange }: {
               <>
                 <button type="button" className="btn btn-secondary btn-sm" onClick={() => { void check.abandon(previewJobId); onClose() }}>Stop</button>
                 <span style={muted}>Nothing is being changed yet - this is only a look.</span>
+              </>
+            ) : hasProgress ? (
+              // It got somewhere before it stopped. Carrying on is the obvious
+              // thing and so it leads; starting over is offered too, because
+              // sometimes that IS what you want - but it says what it costs.
+              <>
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => void runCheck()}>
+                  Carry on from {s!.productsDone > 0 ? n(s!.productsDone, 'product') : n(s!.tabsDone, 'tab')}
+                </button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => void runCheck({ fresh: true })}>
+                  Start again
+                </button>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={requestClose}>Close</button>
               </>
             ) : (
               <>
@@ -553,11 +577,27 @@ function PullModal({ resumable, onClose, onResumableChange }: {
         ) : (
           <>
             <RunningLine
-              text={failed ? 'The check stopped.' : cancelled ? 'Check stopped.' : CHECK_PHASE_LABEL[s?.phase ?? 'READ']}
+              text={
+                failed && hasProgress ? 'The check stopped part-way - nothing is lost.'
+                : failed ? 'The check stopped.'
+                : cancelled ? 'Check stopped.'
+                : CHECK_PHASE_LABEL[s?.phase ?? 'READ']
+              }
               ms={check.elapsedMs}
-              tone={failed ? 'danger' : 'normal'}
+              tone={failed && !hasProgress ? 'danger' : 'normal'}
             />
             {!failed && !cancelled && <PhasePills steps={CHECK_STEPS} current={s?.phase ?? 'READ'} />}
+
+            {/* The removals stage has no per-row cursor to draw a bar from - it is
+                a handful of bulk queries - so it gets a named line instead. It ran
+                for minutes on a real catalogue showing nothing at all, which is
+                the complaint this whole rework exists to answer, surviving into
+                the one phase that had not been given anything to say. */}
+            {s?.phase === 'DELETIONS' && (
+              <p style={{ ...muted, fontSize: '0.8125rem', marginBottom: '0.6rem' }}>
+                {s.currentItem ? `${s.currentItem}…` : 'Working out what has gone…'}
+              </p>
+            )}
 
             {s && s.tabsTotal > 0 && <ProgressRow label="Product tabs read" done={s.tabsDone} total={s.tabsTotal} />}
             {s && s.productsTotal > 0 && <ProgressRow label="Products compared" done={s.productsDone} total={s.productsTotal} />}
@@ -578,6 +618,16 @@ function PullModal({ resumable, onClose, onResumableChange }: {
             {!s && !failed && (
               <p style={{ ...muted, fontSize: '0.8125rem' }}>
                 Reading a big sheet takes a moment. You can leave this open - it keeps going while you watch.
+              </p>
+            )}
+
+            {/* Retries are meant to be invisible, and mostly should be - but a run
+                that covered for eight failed requests looked flawless here while
+                showing up as 5xx in the site's monitoring, and only one of those
+                two was being told. Said quietly, after the fact. */}
+            {check.retries > 0 && (
+              <p style={{ ...muted, fontSize: '0.75rem', marginTop: '0.4rem' }}>
+                {n(check.retries, 'step')} had to be tried again along the way. That is normal on a big sheet and nothing was lost.
               </p>
             )}
 

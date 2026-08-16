@@ -291,6 +291,13 @@ export type PreviewJob = {
   fatal: boolean
   runBy: string | null
   createdAt: Date
+  // When the row was last written - for a finished check, when it FINISHED.
+  // Staleness has to be judged from this, never from createdAt: a check of a big
+  // catalogue takes minutes, and measuring "how old is this answer" from the
+  // moment work STARTED counts the working time as though the answer had been
+  // sitting about going off. On a catalogue where the check takes longer than the
+  // staleness window, that makes every finished check stale on arrival.
+  updatedAt: Date
 }
 
 // The live snapshot the check dialog polls. `preview` only arrives once the job

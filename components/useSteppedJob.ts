@@ -52,6 +52,10 @@ export type SteppedJob<S extends SteppedStatus> = {
   setError: (message: string | null) => void
   /** Milliseconds since the loop first started, for the "this is taking a while" line. */
   elapsedMs: number
+  /** How many steps had to be tried again. Worth showing: a job that completes
+   *  after covering for failures looks perfect to the owner and shows up as 5xx
+   *  in the site's monitoring, and only one of those two is being told. */
+  retries: number
   /** Drive the job to completion, retrying transient failures. */
   run: (jobId: string) => Promise<void>
   /** Stop asking for steps and tell the server to abandon the job. */
@@ -76,6 +80,7 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [elapsedMs, setElapsedMs] = useState(0)
+  const [retries, setRetries] = useState(0)
 
   const pollRef = useRef<number | null>(null)
   const tickRef = useRef<number | null>(null)
@@ -104,6 +109,7 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
     // reading "19h 42m", which is true of the job and useless about the work.
     startedAt.current = Date.now()
     setElapsedMs(0)
+    setRetries(0)
 
     stopTimers()
     // Poll alongside the step loop: a single step can run for half a minute, and
@@ -117,7 +123,7 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
       if (startedAt.current !== null) setElapsedMs(Date.now() - startedAt.current)
     }, 1000)
 
-    let retries = 0
+    let attemptsSinceProgress = 0
     let lastProgress: string | null = null
     // How many successful steps in a row have moved nothing. A step can honestly
     // do no work: another tab holds the job's lease, or the last request was
@@ -142,7 +148,7 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
             setStatus(next)
             if (next.done || next.status === 'CANCELLED') break
             const progress = progressOf(next)
-            if (progress !== lastProgress) { lastProgress = progress; retries = 0; idleRuns = 0 }
+            if (progress !== lastProgress) { lastProgress = progress; attemptsSinceProgress = 0; idleRuns = 0 }
             else idleRuns += 1
             if (next.status !== 'FAILED') {
               // Nothing moved: wait a moment rather than asking again at once.
@@ -160,12 +166,13 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
         } catch {
           failReason = 'The connection dropped.' // network hiccup - retry quietly
         }
-        retries += 1
-        if (retries > MAX_STEP_RETRIES) {
+        attemptsSinceProgress += 1
+        setRetries((n) => n + 1)
+        if (attemptsSinceProgress > MAX_STEP_RETRIES) {
           setError(`${failReason} It was retried ${MAX_STEP_RETRIES} times without getting further - press Continue to keep trying, or Cancel.`)
           break
         }
-        await sleep(Math.min(2000 * retries, 8000))
+        await sleep(Math.min(2000 * attemptsSinceProgress, 8000))
       }
     } finally {
       looping.current = false
@@ -188,5 +195,5 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
 
   const allowRestart = useCallback(() => { stopRequested.current = false }, [])
 
-  return { status, setStatus, working, error, setError, elapsedMs, run, abandon, allowRestart }
+  return { status, setStatus, working, error, setError, elapsedMs, retries, run, abandon, allowRestart }
 }

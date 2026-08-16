@@ -43,10 +43,44 @@ const PROD_ROW_CHUNK = 40
 // big clear-out is not a thousand round trips.
 const DELETE_CHUNK = 100
 
-// How long one /pull/step keeps starting new chunks. Well under the module
-// dispatcher's 60s ceiling so the slowest single chunk still finishes and gets
-// its cursor write in before the platform kills the request.
-const STEP_TIME_BUDGET_MS = 35_000
+// The platform kills a module route at sixty seconds - a cliff, not a target.
+const MODULE_ROUTE_CEILING_MS = 60_000
+
+// How long one /pull/step keeps STARTING new chunks, leaving the rest of the
+// ceiling as room for the chunk in flight to finish. Was 35s, which left only 25s
+// of headroom: a slow import chunk on top of that is a 504, the browser retries,
+// and the owner's site logs a failed request for work that was going fine.
+const STEP_TIME_BUDGET_MS = 20_000
+
+// Margin before the platform's ceiling inside which it is not worth STARTING the
+// guaranteed chunk. Past this the request is about to be killed, so the chunk
+// could not land its cursor anyway - beginning it would burn the work twice over.
+const CHUNK_START_MARGIN_MS = 15_000
+
+// A step must normally finish at least ONE chunk, whatever the budget clock says.
+// A phase whose setup outgrows the budget would otherwise never enter its loop,
+// never move its cursor, and be repeated identically by every step that followed
+// - a job that cannot finish rather than one that is merely slow. That is what
+// "Products compared - 0 of 445" was.
+//
+// The one exception is the ceiling: if setup has already eaten so much of the
+// sixty seconds that a chunk cannot land, the step gives up cleanly instead of
+// being killed mid-chunk. The callers treat "did nothing at all" as an error
+// worth showing, so that case surfaces rather than looping in silence.
+function mayStartChunk(chunksDone: number, startedAt: number): boolean {
+  const elapsed = Date.now() - startedAt
+  if (chunksDone === 0) return elapsed < MODULE_ROUTE_CEILING_MS - CHUNK_START_MARGIN_MS
+  return elapsed < STEP_TIME_BUDGET_MS
+}
+
+// What a phase says when its setup alone has used up the request. Loud on
+// purpose: silence here is what a wedged job looks like from the outside.
+function setupTooSlow(what: string): Error {
+  return new Error(
+    `Loading your ${what} took so long that there was no time left to compare anything. ` +
+    'This usually clears on its own - if it keeps happening, your catalogue has outgrown what one pass can do.',
+  )
+}
 
 // How many finished rows the dialog keeps on screen, newest first.
 const RECENT_ITEMS = 8
@@ -299,10 +333,12 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       // to the filtered position on jobs created before the row map existed.
       const prodSheetRow = (filteredIndex: number) => job.productsRowMap?.[filteredIndex] ?? (filteredIndex + 2)
       const reporter = makeRowReporter(jobId, job.recentItems ?? [])
-      while (cursor < dataRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+      let chunksDone = 0
+      while (cursor < dataRows.length && mayStartChunk(chunksDone, stepStartedAt)) {
         // Stop pressed since the step began? Leave the cursor where it is and
         // get out - rows already imported stay, the rest are never fed in.
         if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
+        chunksDone++
         const chunk = dataRows.slice(cursor, cursor + PROD_ROW_CHUNK)
         const subGrid = [header, ...chunk]
         // The engine matches by SKU/slug and diffs before writing, so feeding it
@@ -374,8 +410,10 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       let prodErrors = job.prodErrors ?? []
       let varErrors = job.varErrors ?? []
 
-      while (prodCursor < plan.products.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+      let delChunks = 0
+      while (prodCursor < plan.products.length && mayStartChunk(delChunks, stepStartedAt)) {
         if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
+        delChunks++
         const chunk = plan.products.slice(prodCursor, prodCursor + DELETE_CHUNK)
         const res = await applyProductDeletions(chunk)
         prodCursor += chunk.length
@@ -389,8 +427,10 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         })
       }
 
-      while (varCursor < plan.variations.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+      let varDelChunks = 0
+      while (varCursor < plan.variations.length && mayStartChunk(varDelChunks, stepStartedAt)) {
         if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
+        varDelChunks++
         const chunk = plan.variations.slice(varCursor, varCursor + DELETE_CHUNK)
         const res = await applyVariationDeletions(chunk)
         varCursor += chunk.length
@@ -428,13 +468,15 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
       let created = job.varCreated
       let updated = job.varUpdated
       let errors = job.varErrors ?? []
-      while (cursor < orderedRows.length && Date.now() - stepStartedAt < STEP_TIME_BUDGET_MS) {
+      let varChunks = 0
+      while (cursor < orderedRows.length && mayStartChunk(varChunks, stepStartedAt)) {
         // Stop pressed since the step began? Leave the cursor where it is and get
         // out - the rows already imported stay, the rest are simply never fed in.
         if ((await getPullJobStatus(jobId)) === 'CANCELLED') return
         // Extend to whole parents until the row target is met - never split a
         // parent. groupStarts ends with a sentinel = orderedRows.length, so the
         // last (possibly small) group still gets picked up.
+        varChunks++
         let end = cursor
         for (const start of groupStarts) {
           if (start <= cursor) continue

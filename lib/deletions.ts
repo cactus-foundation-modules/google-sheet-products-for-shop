@@ -73,10 +73,16 @@ export async function planPullDeletions(
   variationsGrid: string[][],
   lastPushAt: Date | null,
   allProducts?: ShpProduct[],
+  // Narration for the dialog. This phase is a handful of bulk queries with no
+  // per-row cursor to hang a bar on, so an owner watching it had a spinner, a
+  // clock and nothing else for minutes - the very complaint the whole rework
+  // started from, surviving into the one phase that had not been instrumented.
+  onProgress?: (what: string) => void,
 ): Promise<PullDeletionPlan> {
   if (!lastPushAt) return { products: [], variations: [] }
   const pushMs = lastPushAt.getTime()
 
+  onProgress?.('Reading your catalogue')
   const all = allProducts ?? await collectPaged<ShpProduct>(async (page) => {
     const { products, total } = await listProducts({ page, perPage: 100, excludeHidden: true })
     return { items: products, total }
@@ -144,12 +150,14 @@ export async function planPullDeletions(
   // one batch rather than once per parent per case. A catalogue with hundreds of
   // variant parents used to mean that many getEditorPayload round trips, twice
   // over on a Pull (once from the preview, once from the run itself).
+  onProgress?.('Finding products with variations')
   const withVariants = await getProductIdsWithVariations()
   const partialParentIds = new Set(
     [...rowsBySlug.keys()].map((slug) => survivingBySlug.get(slug)?.id).filter((id): id is string => !!id),
   )
   const emptyParentIds = withVariants.filter((id) => survivingIds.has(id) && !partialParentIds.has(id))
   const neededIds = new Set([...partialParentIds, ...emptyParentIds])
+  onProgress?.(`Checking the variations on ${neededIds.size} products`)
   const payloadByParentId = await getEditorPayloadsBatch(surviving.filter((p) => neededIds.has(p.id)))
 
   // Partial case: a parent that still has rows, minus the combos those rows list.
@@ -216,6 +224,7 @@ export async function planPullDeletions(
   // Apply the push-baseline anchor: keep only variants whose child product was in
   // the sheet as of the last push. A variant added in the admin since then was
   // never in the sheet, so its absence is not a delete signal.
+  onProgress?.(candidates.length > 0 ? `Working through ${candidates.length} that may have gone` : 'Nothing to remove')
   const createdAt = await createdAtByIds(candidates.map((c) => c.childProductId))
   const variations = candidates.filter((c) => {
     const ts = createdAt.get(c.childProductId)

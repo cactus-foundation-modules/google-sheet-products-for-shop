@@ -402,7 +402,7 @@ async function providerRowChanged(
 // database rather than working. Six at a time keeps the connection pool
 // comfortable (the pool is shared with everything else the admin is doing) while
 // cutting the wall clock to a fraction. Results are still assembled in order.
-const PARENT_CONCURRENCY = 6
+const PARENT_CONCURRENCY = 10
 
 // Everything the Variations diff needs before it can judge a row: the column
 // map, the sheet's rows grouped by parent, each parent product, and each

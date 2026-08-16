@@ -51,6 +51,7 @@ function mapJob(r: Record<string, unknown>): PreviewJob {
     fatal: r.fatal === true,
     runBy: (r.run_by as string | null) ?? null,
     createdAt: r.created_at as Date,
+    updatedAt: (r.updated_at as Date | undefined) ?? (r.created_at as Date),
   }
 }
 
@@ -103,17 +104,65 @@ export async function getRunningPreviewJob(): Promise<PreviewJob | null> {
   return rows[0] ? mapJob(rows[0]) : null
 }
 
-// Retire the RUNNING checks nobody is driving any more, so the one-at-a-time
-// index does not refuse a fresh one. Called before a check is started and before
-// a Push, which are the two places a stranded row would otherwise be felt.
+// Stand down the RUNNING checks nobody is driving any more, so the one-at-a-time
+// index does not refuse a fresh one on behalf of a ghost.
+//
+// Two things this deliberately does NOT do any more, both learned the hard way
+// from a live check that stopped at 250 products of 445 and could not be picked
+// up again:
+//
+//   - It does not CANCEL. Cancelled means the owner pressed Stop, and a job in
+//     that state is offered no way back. A check nobody is driving has not been
+//     stopped by anyone; its cursor is intact and it deserves the same treatment
+//     as any other interrupted job, which is FAILED - the state this module has
+//     always used for "did not finish, carry on from here".
+//   - It does not throw the working grids away. Nulling them is what made the
+//     250 products already compared unrecoverable, so the only button on offer
+//     had to start again from the first tab. The row is bounded by the prune
+//     above; the work is not worth less than the bytes.
 export async function expireStalePreviewJobs(): Promise<void> {
   await prisma.$executeRaw`
     UPDATE "gsp_preview_job"
-    SET "status" = 'CANCELLED', "raw_tabs" = NULL, "products_grid" = NULL, "variations_grid" = NULL,
+    SET "status" = 'FAILED',
+        "error" = 'The check stopped part-way through. Nothing is lost - carry on from where it got to.',
+        "fatal" = false,
         "updated_at" = CURRENT_TIMESTAMP
     WHERE "status" = 'RUNNING'
       AND "updated_at" <= now() - (${PREVIEW_IDLE_MS}::int4 * interval '1 millisecond')
       AND ("step_lease_until" IS NULL OR "step_lease_until" <= now())
+  `
+}
+
+// The most recent check worth carrying on with: one still running, or one that
+// stopped part-way with its place kept. A check the owner cancelled is NOT
+// resumable - they meant stop - and neither is one that finished.
+//
+// This is what stops "Check again" throwing away the work already done. It used
+// to create a fresh job every time, so a check that got three quarters of the way
+// through a big catalogue started again at the first tab, for ever.
+export async function getResumablePreviewJob(): Promise<PreviewJob | null> {
+  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+    SELECT * FROM "gsp_preview_job"
+    WHERE "status" = 'RUNNING'
+       OR ("status" = 'FAILED' AND "fatal" = false AND "products_grid" IS NOT NULL)
+    ORDER BY "created_at" DESC LIMIT 1
+  `
+  return rows[0] ? mapJob(rows[0]) : null
+}
+
+// Put a stopped check back to work. Only ever applied to a job the query above
+// judged resumable, and it clears the lease so the next step can claim it at once
+// rather than waiting out a lease left behind by a killed request.
+export async function resumePreviewJob(id: string): Promise<void> {
+  await prisma.$executeRaw`
+    UPDATE "gsp_preview_job"
+    SET "status" = 'RUNNING', "error" = NULL, "step_lease_until" = NULL, "updated_at" = CURRENT_TIMESTAMP
+    WHERE "id" = ${id} AND "status" = 'FAILED' AND "fatal" = false
+      -- Only one check may be RUNNING, and a partial unique index enforces it.
+      -- Putting this one back to work while another still holds that slot would
+      -- be a constraint violation surfacing as a 500 rather than a refusal, so it
+      -- is checked here instead. Hard to reach and cheap to rule out.
+      AND NOT EXISTS (SELECT 1 FROM "gsp_preview_job" WHERE "status" = 'RUNNING')
   `
 }
 
@@ -220,12 +269,27 @@ export async function pruneOldPreviewJobs(keep = 3): Promise<void> {
 export async function claimPreviewStepLease(jobId: string, leaseMs: number): Promise<Date | null> {
   const claimed = await prisma.$queryRaw<Array<{ step_lease_until: Date }>>`
     UPDATE "gsp_preview_job"
-    SET "step_lease_until" = now() + (${leaseMs}::int4 * interval '1 millisecond')
+    SET "step_lease_until" = now() + (${leaseMs}::int4 * interval '1 millisecond'),
+        -- Claiming a lease IS activity, and must count as such. It did not, and
+        -- that is what made a working check look abandoned: a phase whose setup
+        -- is long writes nothing until its first chunk lands, so if the platform
+        -- killed that step before it got there, updated_at stayed frozen while
+        -- the browser was busily asking for step after step. The idle sweep below
+        -- then declared a job that was being worked on dead.
+        "updated_at" = CURRENT_TIMESTAMP
     WHERE "id" = ${jobId}
       AND ("step_lease_until" IS NULL OR "step_lease_until" < now())
     RETURNING "step_lease_until"
   `
   return claimed[0]?.step_lease_until ?? null
+}
+
+// Touch the job without changing anything, so a phase about to spend a long time
+// in one call still counts as alive while it does.
+export async function heartbeatPreviewJob(jobId: string): Promise<void> {
+  await prisma
+    .$executeRaw`UPDATE "gsp_preview_job" SET "updated_at" = CURRENT_TIMESTAMP WHERE "id" = ${jobId} AND "status" = 'RUNNING'`
+    .catch(() => {})
 }
 
 export async function releasePreviewStepLease(jobId: string, lease: Date): Promise<void> {
