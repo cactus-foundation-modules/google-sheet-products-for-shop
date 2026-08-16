@@ -18,11 +18,12 @@ import {
 import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import { getProductIdsWithVariations } from '@/modules/shop-variations/lib/db/variants'
 import {
-  getPreviewJob, getPreviewJobStatus, updatePreviewJob, heartbeatPreviewJob,
+  getPreviewJobLight, getPreviewJobForStep, getPreviewJobProductsGrid,
+  getPreviewJobStatus, updatePreviewJob, heartbeatPreviewJob,
   claimPreviewStepLease, releasePreviewStepLease,
 } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 import type {
-  PreviewJob, PreviewStatus, PullPreview, PullDetected, SyncRowError,
+  PreviewJob, PreviewJobLight, PreviewStatus, PullPreview, PullDetected, SyncRowError,
 } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // The Pull preview, run as a resumable job (see migrations/012_preview_job.sql).
@@ -158,7 +159,7 @@ function capPush<T>(list: T[], items: T[]): void {
   }
 }
 
-export function previewStatus(job: PreviewJob): PreviewStatus {
+export function previewStatus(job: PreviewJobLight): PreviewStatus {
   return {
     previewJobId: job.id,
     status: job.status,
@@ -199,7 +200,7 @@ function detectedFrom(preview: PullPreview): PullDetected {
 // First slice of the READ phase: the sheet's modified time, the Products tab, and
 // the list of tabs that might be product tabs. Three Google calls, so it always
 // fits a step and the dialog gets its first real numbers straight away.
-async function readOpening(job: PreviewJob, spreadsheetId: string): Promise<void> {
+async function readOpening(job: PreviewJobLight, spreadsheetId: string): Promise<void> {
   // modifiedTime is fetched BEFORE the grids: if the sheet is edited while they
   // are being read, the stored time predates the edit, the Pull's own fetch sees
   // a later instant, and the (possibly torn) snapshot is simply not reused.
@@ -236,7 +237,7 @@ async function readTabGroup(spreadsheetId: string, group: string[]): Promise<str
 // into the one wide grid the rest of the pipeline works off, keep the snapshot
 // for the Pull to reuse, and run the two guards that stop a Pull reading a
 // missing tab as "these variants are gone".
-async function finishRead(job: PreviewJob, productsGrid: string[][], rawTabs: string[][][]): Promise<void> {
+async function finishRead(job: PreviewJobLight, productsGrid: string[][], rawTabs: string[][][]): Promise<void> {
   const conn = await getConnection()
   const variationsGrid = rawTabs.length > 0 ? mergeVariationTabs(rawTabs) : []
 
@@ -303,12 +304,22 @@ async function finishRead(job: PreviewJob, productsGrid: string[][], rawTabs: st
   })
 }
 
-async function runReadPhase(job: PreviewJob, spreadsheetId: string, startedAt: number): Promise<void> {
-  if (!job.productsGrid) {
+// Typed to what it actually reads. The Products grid is deliberately NOT in
+// reach here: only the last of these steps wants it, and it fetches its own.
+async function runReadPhase(
+  job: PreviewJobLight & { rawTabs: string[][][] | null },
+  spreadsheetId: string,
+  startedAt: number,
+): Promise<void> {
+  // "Has the opening slice run yet?" used to be asked of the Products grid, which
+  // meant loading 2.2MB to answer yes or no on every step of a 383-tab read.
+  // readOpening writes the tab list in the same statement as the grid, so they are
+  // set or unset together, and the tab list is a few kilobytes of names.
+  if (!job.tabTitles) {
     await readOpening(job, spreadsheetId)
     return // the next step carries on with the tabs; the dialog gets its totals now
   }
-  const titles = job.tabTitles ?? []
+  const titles = job.tabTitles
   let done = job.tabsDone
   const raw = job.rawTabs ?? []
   let lastBankAt = Date.now()
@@ -335,7 +346,12 @@ async function runReadPhase(job: PreviewJob, spreadsheetId: string, startedAt: n
       await updatePreviewJob(job.id, { currentItem })
     }
   }
-  if (done >= titles.length) await finishRead({ ...job, tabsDone: done }, job.productsGrid, raw)
+  // Only now is the Products tab wanted, so only now is it fetched.
+  if (done >= titles.length) {
+    const productsGrid = await getPreviewJobProductsGrid(job.id)
+    if (!productsGrid) throw new OwnerMessageError('The check lost its copy of the Products tab. Start it again.')
+    await finishRead({ ...job, tabsDone: done }, productsGrid, raw)
+  }
 }
 
 // --- PRODUCTS ---------------------------------------------------------------
@@ -544,7 +560,7 @@ async function runVariationsPhase(job: PreviewJob, startedAt: number): Promise<v
 // Close the check exactly once: flip to COMPLETED atomically, then drop the
 // working grids. Only the worker that wins the flip finalises, so a crash and a
 // retry cannot double-count anything.
-async function finalisePreviewJob(job: PreviewJob): Promise<void> {
+async function finalisePreviewJob(job: PreviewJobLight): Promise<void> {
   if (job.status === 'CANCELLED' || (await getPreviewJobStatus(job.id)) === 'CANCELLED') return
   const preview = job.preview ?? emptyPreview()
 
@@ -578,7 +594,10 @@ async function runPreviewStep(job: PreviewJob): Promise<void> {
     else if (job.phase === 'DELETIONS') await runDeletionsPhase(job)
     else if (job.phase === 'VARIATIONS') await runVariationsPhase(job, startedAt)
 
-    const after = await getPreviewJob(job.id)
+    // Light: this only asks whether the phase we just ran finished the job off,
+    // and finalising reads the preview and nothing else. The grids this step was
+    // working with are already banked.
+    const after = await getPreviewJobLight(job.id)
     if (after && after.phase === 'DONE' && after.status === 'RUNNING') await finalisePreviewJob(after)
   } catch (err) {
     // A failed step leaves every cursor intact and the job FAILED, so Continue
@@ -603,15 +622,22 @@ async function runPreviewStep(job: PreviewJob): Promise<void> {
 // Run exactly one bounded slice of the check and return the live snapshot. Safe
 // to call repeatedly (the browser loops it) and safe to resume: every phase picks
 // up from its own cursor and nothing it does is a write to the catalogue.
+// Of the four reads this used to make per step, exactly one wants a grid. The
+// other three were asking "is it finished?", "did that finish it?" and "what do
+// I tell the browser?" - and paying 4MB each time to find out.
 export async function stepPreviewJob(jobId: string): Promise<PreviewStatus | null> {
-  const job = await getPreviewJob(jobId)
+  const job = await getPreviewJobLight(jobId)
   if (!job) return null
   if (job.status === 'COMPLETED' || job.status === 'CANCELLED') return previewStatus(job)
 
   const lease = await claimPreviewStepLease(jobId, STEP_LEASE_MS)
   if (lease) {
     try {
-      const fresh = await getPreviewJob(jobId)
+      // The one heavy read, and it takes only the grids its own phase compares.
+      // Re-read after the lease rather than reusing the snapshot above: the phase
+      // may have moved on between the two, and the phase is what decides which
+      // grids come back.
+      const fresh = await getPreviewJobForStep(jobId)
       if (fresh && fresh.status !== 'COMPLETED' && fresh.status !== 'CANCELLED') await runPreviewStep(fresh)
     } catch (err) {
       // Only the lease machinery's own failures land here - a phase error is
@@ -627,6 +653,6 @@ export async function stepPreviewJob(jobId: string): Promise<PreviewStatus | nul
     }
   }
 
-  const after = await getPreviewJob(jobId)
+  const after = await getPreviewJobLight(jobId)
   return after ? previewStatus(after) : null
 }

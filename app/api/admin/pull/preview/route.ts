@@ -6,7 +6,7 @@ import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import {
-  createPreviewJob, getPreviewJob, getRunningPreviewJob, getResumablePreviewJob, resumePreviewJob,
+  createPreviewJob, getPreviewJobLight, getRunningPreviewJob, getResumablePreviewJob, resumePreviewJob,
   pruneOldPreviewJobs, expireStalePreviewJobs, cancelPreviewJob, PreviewAlreadyRunningError,
 } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 import { previewStatus } from '@/modules/google-sheet-products-for-shop/lib/preview-run'
@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
       // Re-read the one we just touched, by id. The resume can decline (another
       // check holds the one-at-a-time slot), and the honest thing to report is
       // what the row actually says now rather than what we asked it to become.
-      const refreshed = (await getPreviewJob(resumable.id)) ?? resumable
+      const refreshed = (await getPreviewJobLight(resumable.id)) ?? resumable
       return NextResponse.json({
         previewJobId: refreshed.id,
         status: previewStatus(refreshed),

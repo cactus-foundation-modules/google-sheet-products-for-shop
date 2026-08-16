@@ -64,8 +64,37 @@ function freshJob(): PreviewJob {
 // fake database must not get wrong, since resuming is what is under test.
 const copy = <T>(v: T): T => (v === undefined || v === null ? v : JSON.parse(JSON.stringify(v)) as T)
 
+// Which grids the real getPreviewJobForStep hands back for a given phase. Faked
+// here too, and deliberately: a phase that reads a grid the SQL gates away would
+// pass a test that always served the lot, and fail live with "the check lost its
+// copy of the sheet". Keep this in step with the CASE arms in preview-job.ts.
+const GRIDS_FOR_PHASE: Record<string, Array<'productsGrid' | 'variationsGrid' | 'rawTabs'>> = {
+  READ: ['productsGrid', 'rawTabs'],
+  PRODUCTS: ['productsGrid'],
+  DELETIONS: ['productsGrid', 'variationsGrid'],
+  VARIATIONS: ['variationsGrid'],
+  DONE: [],
+}
+
 vi.mock('@/modules/google-sheet-products-for-shop/lib/preview-job', () => ({
-  getPreviewJob: vi.fn(async () => ({ ...job, preview: copy(job.preview), rawTabs: copy(job.rawTabs) })),
+  getPreviewJobLight: vi.fn(async () => {
+    const { productsGrid: _p, variationsGrid: _v, rawTabs: _r, ...light } = job
+    return { ...light, preview: copy(job.preview) }
+  }),
+  getPreviewJobForStep: vi.fn(async () => {
+    const allowed = GRIDS_FOR_PHASE[job.phase] ?? []
+    return {
+      ...job,
+      preview: copy(job.preview),
+      rawTabs: allowed.includes('rawTabs') ? copy(job.rawTabs) : null,
+      productsGrid: allowed.includes('productsGrid') ? job.productsGrid : null,
+      variationsGrid: allowed.includes('variationsGrid') ? job.variationsGrid : null,
+    }
+  }),
+  // The Products tab, fetched on its own by the one READ step that merges. The
+  // fake serves it whatever the phase, exactly as the real query does - the
+  // point of the separate call is that only that step ever makes it.
+  getPreviewJobProductsGrid: vi.fn(async () => job.productsGrid),
   getPreviewJobStatus: vi.fn(async () => job.status),
   updatePreviewJob: vi.fn(async (_id: string, fields: Record<string, unknown>) => {
     if (swallowNextWrite) { swallowNextWrite = false; return }

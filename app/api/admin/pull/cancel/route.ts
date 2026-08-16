@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { cancelPullJob, getPullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { cancelPullJob, getPullJobLight } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { pullStatus } from '@/modules/google-sheet-products-for-shop/lib/pull-run'
 
 // Abandon a Pull, whether it is paused, failed, or running right now. Whatever
@@ -21,6 +21,6 @@ export async function POST(req: NextRequest) {
   await cancelPullJob(pullJobId)
   // Hand back the snapshot as it stands, so the dialog can show what did land
   // rather than blanking the numbers the moment Stop is pressed.
-  const job = await getPullJob(pullJobId)
+  const job = await getPullJobLight(pullJobId)
   return NextResponse.json({ ok: true, status: job ? await pullStatus(job) : null })
 }

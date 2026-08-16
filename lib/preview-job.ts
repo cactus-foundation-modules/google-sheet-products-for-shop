@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
 import type {
-  PreviewJob, PreviewJobStatus, PreviewPhase, PullPreview, PullDetected, StoredDeletionPlan,
+  PreviewJob, PreviewJobLight, PreviewJobStatus, PreviewPhase, PullPreview, PullDetected, StoredDeletionPlan,
 } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // The data layer for one gsp_preview_job row (see migrations/012_preview_job.sql):
@@ -22,7 +22,18 @@ function asNumbers(v: unknown): number[] | null {
   return Array.isArray(v) ? (v as number[]) : null
 }
 
-function mapJob(r: Record<string, unknown>): PreviewJob {
+// Every column except the three heavy ones, named rather than starred. A
+// `SELECT *` here reads 4MB off Deskwell's row whatever the caller wanted, and
+// that is exactly the bill this list exists to stop paying - so the columns are
+// spelled out, and a new one has to be added here on purpose.
+const LIGHT_COLUMNS = Prisma.sql`
+  "id", "status", "phase", "tab_titles", "tabs_total", "tabs_done", "drive_modified_time",
+  "products_total", "products_done", "variations_total", "variations_done", "current_item",
+  "preview", "filtered_products", "products_row_map", "filtered_variations", "variations_row_map",
+  "deletion_plan", "detected", "last_push_at", "error", "fatal", "run_by", "created_at", "updated_at"
+`
+
+function mapLightJob(r: Record<string, unknown>): PreviewJobLight {
   return {
     id: r.id as string,
     status: r.status as PreviewJobStatus,
@@ -30,10 +41,7 @@ function mapJob(r: Record<string, unknown>): PreviewJob {
     tabTitles: asStrings(r.tab_titles),
     tabsTotal: r.tabs_total as number,
     tabsDone: r.tabs_done as number,
-    rawTabs: asGrids(r.raw_tabs),
     driveModifiedTime: (r.drive_modified_time as Date | null) ?? null,
-    productsGrid: asGrid(r.products_grid),
-    variationsGrid: asGrid(r.variations_grid),
     productsTotal: r.products_total as number,
     productsDone: r.products_done as number,
     variationsTotal: r.variations_total as number,
@@ -52,6 +60,19 @@ function mapJob(r: Record<string, unknown>): PreviewJob {
     runBy: (r.run_by as string | null) ?? null,
     createdAt: r.created_at as Date,
     updatedAt: (r.updated_at as Date | undefined) ?? (r.created_at as Date),
+  }
+}
+
+// The light row plus whichever grids the query actually asked for. A grid the
+// SELECT gated away arrives as undefined and maps to null, which is why only
+// getPreviewJobForStep may use this - it is the one caller that knows, from the
+// phase it just read, which grids it is entitled to.
+function mapJob(r: Record<string, unknown>): PreviewJob {
+  return {
+    ...mapLightJob(r),
+    rawTabs: asGrids(r.raw_tabs),
+    productsGrid: asGrid(r.products_grid),
+    variationsGrid: asGrid(r.variations_grid),
   }
 }
 
@@ -74,9 +95,49 @@ export async function createPreviewJob(data: { runBy: string }): Promise<{ id: s
   }
 }
 
-export async function getPreviewJob(id: string): Promise<PreviewJob | null> {
-  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`SELECT * FROM "gsp_preview_job" WHERE "id" = ${id} LIMIT 1`
+// One check, without its grids. What every caller but the stepper wants.
+export async function getPreviewJobLight(id: string): Promise<PreviewJobLight | null> {
+  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+    SELECT ${LIGHT_COLUMNS} FROM "gsp_preview_job" WHERE "id" = ${id} LIMIT 1
+  `
+  return rows[0] ? mapLightJob(rows[0]) : null
+}
+
+// Which grids a phase reads. Kept beside the SQL that applies it so the two
+// cannot drift: a phase added to the runner without a line here would get no
+// grid at all and say it had lost its copy of the sheet.
+//
+//   READ       accumulates the per-tab bodies. It holds the Products tab too, but
+//              only the step that finishes the tabs actually reads it, so that one
+//              fetches it on its own through getPreviewJobProductsGrid rather than
+//              every READ step carrying 2.2MB it will not open.
+//   PRODUCTS   compares Products rows. Never looks at the variations grid.
+//   DELETIONS  needs both, to work out what is in neither.
+//   VARIATIONS compares parent groups. Never looks at the products grid.
+//   DONE       is finalising, and reads no grid at all.
+//
+// The gating is done in SQL rather than after the fact because the cost being
+// avoided is the transfer, not the decoding: a CASE that yields NULL sends
+// nothing down the wire, where selecting the column and ignoring it in
+// JavaScript would have paid the whole bill and thrown the result away.
+export async function getPreviewJobForStep(id: string): Promise<PreviewJob | null> {
+  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+    SELECT ${LIGHT_COLUMNS},
+      CASE WHEN "phase" IN ('PRODUCTS', 'DELETIONS') THEN "products_grid" END AS "products_grid",
+      CASE WHEN "phase" IN ('DELETIONS', 'VARIATIONS') THEN "variations_grid" END AS "variations_grid",
+      CASE WHEN "phase" = 'READ' THEN "raw_tabs" END AS "raw_tabs"
+    FROM "gsp_preview_job" WHERE "id" = ${id} LIMIT 1
+  `
   return rows[0] ? mapJob(rows[0]) : null
+}
+
+// The Products tab on its own, for the single READ step that finishes the tabs
+// and merges everything. Every other READ step would only be carrying it about.
+export async function getPreviewJobProductsGrid(id: string): Promise<string[][] | null> {
+  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+    SELECT "products_grid" FROM "gsp_preview_job" WHERE "id" = ${id} LIMIT 1
+  `
+  return rows[0] ? asGrid(rows[0].products_grid) : null
 }
 
 // How long a RUNNING check may go without a word before it counts as abandoned.
@@ -93,15 +154,15 @@ const PREVIEW_IDLE_MS = 3 * 60_000
 // the Pull dialog simply starts another - so a browser closed mid-check used to
 // leave a RUNNING row that answered "yes" for ever, and a Push (which refuses
 // while the sheet is being read) had no way past it short of a database edit.
-export async function getRunningPreviewJob(): Promise<PreviewJob | null> {
+export async function getRunningPreviewJob(): Promise<PreviewJobLight | null> {
   const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
-    SELECT * FROM "gsp_preview_job"
+    SELECT ${LIGHT_COLUMNS} FROM "gsp_preview_job"
     WHERE "status" = 'RUNNING'
       AND ("updated_at" > now() - (${PREVIEW_IDLE_MS}::int4 * interval '1 millisecond')
            OR "step_lease_until" > now())
     ORDER BY "created_at" DESC LIMIT 1
   `
-  return rows[0] ? mapJob(rows[0]) : null
+  return rows[0] ? mapLightJob(rows[0]) : null
 }
 
 // Stand down the RUNNING checks nobody is driving any more, so the one-at-a-time
@@ -140,14 +201,17 @@ export async function expireStalePreviewJobs(): Promise<void> {
 // This is what stops "Check again" throwing away the work already done. It used
 // to create a fresh job every time, so a check that got three quarters of the way
 // through a big catalogue started again at the first tab, for ever.
-export async function getResumablePreviewJob(): Promise<PreviewJob | null> {
+export async function getResumablePreviewJob(): Promise<PreviewJobLight | null> {
+  // "products_grid IS NOT NULL" stays in the WHERE - it is the test for "this one
+  // still has its working state, so it can be carried on". Testing it costs
+  // nothing; SELECTing it is what cost 2.2MB.
   const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
-    SELECT * FROM "gsp_preview_job"
+    SELECT ${LIGHT_COLUMNS} FROM "gsp_preview_job"
     WHERE "status" = 'RUNNING'
        OR ("status" = 'FAILED' AND "fatal" = false AND "products_grid" IS NOT NULL)
     ORDER BY "created_at" DESC LIMIT 1
   `
-  return rows[0] ? mapJob(rows[0]) : null
+  return rows[0] ? mapLightJob(rows[0]) : null
 }
 
 // Put a stopped check back to work. Only ever applied to a job the query above

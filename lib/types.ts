@@ -127,6 +127,12 @@ export type PullJob = {
   createdAt: Date
 }
 
+// A Pull job without its two grids - the same split, and for the same reason,
+// as PreviewJobLight. These grids are the FILTERED ones, so on a settled
+// catalogue they are small, but a Pull that changes a lot carries most of the
+// sheet - and the dialog polls this row every 1.5s either way.
+export type PullJobLight = Omit<PullJob, 'productsGrid' | 'variationsGrid'>
+
 // --- Resumable Push job ----------------------------------------------------
 
 // BUILD_PRODUCTS and BUILD_TABS assemble the catalogue snapshot the later phases
@@ -163,6 +169,13 @@ export type PushJob = {
   runBy: string | null
   createdAt: Date
 }
+
+// A Push job without its two snapshots - the same split, and for the same
+// reason, as PreviewJobLight. The Products grid and the per-product tabs are the
+// whole weight of the row; the counters the dialog polls every 1.5s, and the
+// guards that only want to know whether a Push is running at all, are a few
+// hundred bytes. See PreviewJobLight for the measurement that prompted this.
+export type PushJobLight = Omit<PushJob, 'productsGrid' | 'variationTabs'>
 
 // The live snapshot the browser polls while a Push runs (and on Continue).
 export type PushStatus = {
@@ -299,6 +312,25 @@ export type PreviewJob = {
   // staleness window, that makes every finished check stale on arrival.
   updatedAt: Date
 }
+
+// The columns that make a check's row enormous: the Products tab, the merged
+// product tabs, and the per-tab bodies read on the way there. On Deskwell they
+// are 2.2MB, 1.9MB and change - the rest of the row is a couple of dozen
+// kilobytes all told.
+//
+// Only the phase currently running needs any of them, and only ever one or two.
+// Everything else that reads a check - the dialog's poll every 1.5s, the Pull
+// adopting a finished one, every guard that asks "is a check running?" - wants
+// the counts and the status and nothing more. Reading the grids for those was
+// the whole cost of a check: measured live, 92% of the Products phase was the
+// database pushing this row down the wire, over and over, while the comparison
+// it was supposed to be doing took a fifth of a second.
+//
+// So the light shape is the DEFAULT one, and it omits the three fields rather
+// than nulling them. Nulling would compile everywhere and fail at run time as
+// "The check lost its copy of the Products tab"; omitting makes reaching for a
+// grid you did not load a type error at the point of the mistake.
+export type PreviewJobLight = Omit<PreviewJob, 'productsGrid' | 'variationsGrid' | 'rawTabs'>
 
 // The live snapshot the check dialog polls. `preview` only arrives once the job
 // has finished - a half-diffed catalogue would show counts that are simply wrong.

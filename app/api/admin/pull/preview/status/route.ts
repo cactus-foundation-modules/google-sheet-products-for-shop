@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { getPreviewJob, getRunningPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
+import { getPreviewJobLight, getRunningPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 import { previewStatus } from '@/modules/google-sheet-products-for-shop/lib/preview-run'
 
 // The live snapshot the check dialog polls. With a previewJobId it returns that
@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
 
   const id = req.nextUrl.searchParams.get('previewJobId')
-  const job = id ? await getPreviewJob(id) : await getRunningPreviewJob()
+  const job = id ? await getPreviewJobLight(id) : await getRunningPreviewJob()
   if (!job) return NextResponse.json({ status: null })
   return NextResponse.json({ status: previewStatus(job) })
 }

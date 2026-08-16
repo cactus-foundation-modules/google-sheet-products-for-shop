@@ -8,10 +8,10 @@ import { planPullDeletions } from '@/modules/google-sheet-products-for-shop/lib/
 import { applyProductDeletions, applyVariationDeletions } from '@/modules/google-sheet-products-for-shop/lib/delete-pass'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import { stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
-import { getPullJob, getPullJobStatus, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
+import { getPullJobLight, getPullJobForStep, getPullJobStatus, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { prisma } from '@/lib/db/prisma'
 import { describeFailure, OwnerMessageError } from '@/modules/google-sheet-products-for-shop/lib/failure'
-import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
+import type { PullJob, PullJobLight, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // How many variation rows land in one importer call. Each call carries a fixed
 // per-parent cost (load the parent, its variants, their fields, its options and
@@ -135,15 +135,15 @@ function makeRowReporter(jobId: string, initialRecent: string[]) {
 // is behind us, products are simply all done. The in-chunk offset rides on top
 // so the bar moves per row rather than in jumps of 25; it is display only and
 // never outruns the total.
-function productsDoneFor(job: PullJob): number {
+function productsDoneFor(job: PullJobLight): number {
   return job.phase === 'PRODUCTS' ? Math.min(job.productsDone + job.currentOffset, job.productsTotal) : job.productsTotal
 }
 
-function variationsDoneFor(job: PullJob): number {
+function variationsDoneFor(job: PullJobLight): number {
   return job.phase === 'VARIATIONS' ? Math.min(job.variationsDone + job.currentOffset, job.variationsTotal) : job.variationsDone
 }
 
-export async function pullStatus(job: PullJob): Promise<PullStatus> {
+export async function pullStatus(job: PullJobLight): Promise<PullStatus> {
   const productsDone = productsDoneFor(job)
   // The removals stage's own bar. The plan is cleared once the job finishes, so
   // the total comes from the headline counts the check computed - which is the
@@ -184,7 +184,7 @@ export async function pullStatus(job: PullJob): Promise<PullStatus> {
 
 // Write the two audit rows, stamp the pull, and close the job. Called once the
 // last variation batch lands (or immediately if there were no variation rows).
-async function finalizePullJob(job: PullJob): Promise<void> {
+async function finalizePullJob(job: PullJobLight): Promise<void> {
   // A Stop that lands between the last chunk and here must not produce a
   // "COMPLETED" pair of audit rows for a pull that was abandoned.
   if (job.status === 'CANCELLED' || (await getPullJobStatus(job.id)) === 'CANCELLED') return
@@ -513,7 +513,8 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         })
       }
       if (cursor >= orderedRows.length) {
-        const reloaded = await getPullJob(jobId)
+        // Light: finalising reads the counters, never a grid.
+        const reloaded = await getPullJobLight(jobId)
         if (reloaded) await finalizePullJob(reloaded)
       }
     } else {
@@ -542,7 +543,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
 // idempotent, so re-running a batch after a failure or a closed tab just re-does
 // no-ops until it gets past where it stopped. Returns null if the job is gone.
 export async function stepPullJob(jobId: string, adminEmail: string): Promise<PullStatus | null> {
-  const job = await getPullJob(jobId)
+  const job = await getPullJobLight(jobId)
   if (!job) return null
   if (job.status === 'COMPLETED' || job.status === 'CANCELLED') return pullStatus(job)
 
@@ -556,7 +557,8 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
     await withPullStepLock(jobId, async () => {
       // Re-read inside the lock: the worker that held it may have advanced or even
       // finished the job between our first read and our acquiring it.
-      const fresh = await getPullJob(jobId)
+      // The one heavy read, and only the grid its own phase imports.
+      const fresh = await getPullJobForStep(jobId)
       if (!fresh || fresh.status === 'COMPLETED' || fresh.status === 'CANCELLED') return
       await runPullStep(fresh, adminEmail)
     })
@@ -578,6 +580,6 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
     await updatePullJob(jobId, { status: 'FAILED', error: failure.message }).catch(() => {})
   }
 
-  const after = await getPullJob(jobId)
+  const after = await getPullJobLight(jobId)
   return after ? pullStatus(after) : null
 }

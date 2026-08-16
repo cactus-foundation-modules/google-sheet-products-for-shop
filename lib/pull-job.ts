@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db/prisma'
-import type { PullJob, PullPhase, PullJobStatus, PullDetected, StoredDeletionPlan, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
+import type { PullJob, PullJobLight, PullPhase, PullJobStatus, PullDetected, StoredDeletionPlan, SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // A Pull is a resumable job (see migrations/002_pull_job.sql). This is the whole
 // data layer for the gsp_pull_job row: create it at start, read it each step,
@@ -21,13 +21,22 @@ function asStrings(v: unknown): string[] | null {
   return Array.isArray(v) ? (v as string[]).filter((s) => typeof s === 'string') : null
 }
 
-function mapJob(r: Record<string, unknown>): PullJob {
+// Every column but the two grids, named rather than starred - see PullJobLight.
+// A new column has to be added here on purpose.
+const LIGHT_COLUMNS = Prisma.sql`
+  "id", "status", "phase", "products_row_map", "variations_row_map", "deletion_plan",
+  "last_push_at", "shop_import_job_id", "detected", "products_total", "products_done",
+  "variations_total", "variations_done", "prod_created", "prod_updated", "prod_skipped",
+  "prod_deleted", "var_created", "var_updated", "var_deleted", "prod_deletions_done",
+  "var_deletions_done", "prod_errors", "var_errors", "current_item", "current_offset",
+  "recent_items", "error", "run_by", "created_at"
+`
+
+function mapLightJob(r: Record<string, unknown>): PullJobLight {
   return {
     id: r.id as string,
     status: r.status as PullJobStatus,
     phase: r.phase as PullPhase,
-    productsGrid: asGrid(r.products_grid),
-    variationsGrid: asGrid(r.variations_grid),
     productsRowMap: asNumbers(r.products_row_map),
     variationsRowMap: asNumbers(r.variations_row_map),
     deletionPlan: (r.deletion_plan as StoredDeletionPlan | null) ?? null,
@@ -55,6 +64,17 @@ function mapJob(r: Record<string, unknown>): PullJob {
     error: (r.error as string | null) ?? null,
     runBy: (r.run_by as string | null) ?? null,
     createdAt: r.created_at as Date,
+  }
+}
+
+// The light row plus whichever grid the query asked for. Only getPullJobForStep
+// may use this: it is the one caller that knows, from the phase it just read,
+// which grids it is entitled to.
+function mapJob(r: Record<string, unknown>): PullJob {
+  return {
+    ...mapLightJob(r),
+    productsGrid: asGrid(r.products_grid),
+    variationsGrid: asGrid(r.variations_grid),
   }
 }
 
@@ -107,21 +127,43 @@ export async function createPullJob(data: {
   }
 }
 
-export async function getPullJob(id: string): Promise<PullJob | null> {
-  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`SELECT * FROM "gsp_pull_job" WHERE "id" = ${id} LIMIT 1`
+// One Pull job, without its grids. What every caller but the stepper wants.
+export async function getPullJobLight(id: string): Promise<PullJobLight | null> {
+  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+    SELECT ${LIGHT_COLUMNS} FROM "gsp_pull_job" WHERE "id" = ${id} LIMIT 1
+  `
+  return rows[0] ? mapLightJob(rows[0]) : null
+}
+
+// Which grid a phase reads. Kept beside the SQL that applies it so the two
+// cannot drift.
+//
+//   PRODUCTS    imports the Products rows. Never looks at the variations grid.
+//   DELETIONS   needs both, to work out what is in neither.
+//   VARIATIONS  imports the variation rows. Never looks at the products grid.
+//   DONE        is finalising, and reads neither.
+//
+// Gated in SQL because the cost being avoided is the transfer, not the decoding.
+export async function getPullJobForStep(id: string): Promise<PullJob | null> {
+  const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+    SELECT ${LIGHT_COLUMNS},
+      CASE WHEN "phase" IN ('PRODUCTS', 'DELETIONS') THEN "products_grid" END AS "products_grid",
+      CASE WHEN "phase" IN ('DELETIONS', 'VARIATIONS') THEN "variations_grid" END AS "variations_grid"
+    FROM "gsp_pull_job" WHERE "id" = ${id} LIMIT 1
+  `
   return rows[0] ? mapJob(rows[0]) : null
 }
 
 // The most recent job that has neither completed nor been cancelled - what the
 // toolbar checks on load to decide whether to offer Continue. A FAILED job counts
 // as unfinished: its cursor is intact, so Continue can retry from where it broke.
-export async function getLatestUnfinishedPullJob(): Promise<PullJob | null> {
+export async function getLatestUnfinishedPullJob(): Promise<PullJobLight | null> {
   const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
-    SELECT * FROM "gsp_pull_job"
+    SELECT ${LIGHT_COLUMNS} FROM "gsp_pull_job"
     WHERE "status" IN ('RUNNING', 'FAILED')
     ORDER BY "created_at" DESC LIMIT 1
   `
-  return rows[0] ? mapJob(rows[0]) : null
+  return rows[0] ? mapLightJob(rows[0]) : null
 }
 
 // Just the status column. The variations loop reads this between chunks so a

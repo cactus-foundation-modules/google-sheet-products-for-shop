@@ -7,8 +7,8 @@ import { getConnection } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getSheetModifiedTime } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { createPullJob, getLatestUnfinishedPullJob, PullAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
-import { getPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
-import type { PullDetected, PreviewJob, StoredDeletionPlan } from '@/modules/google-sheet-products-for-shop/lib/types'
+import { getPreviewJobLight } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
+import type { PullDetected, PreviewJobLight, StoredDeletionPlan } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // How old a finished check may be and still be adopted. A Pull is normally
 // pressed seconds after the dialog lists what it will do; a dialog left open over
@@ -152,9 +152,9 @@ async function startPullJob(
 // modifiedTime, the same test the snapshot reuse uses. Anything uncertain (Drive
 // not answering, no stored time) reads as "no", and the owner gets a fresh check.
 async function adoptPreview(previewJobId: string, spreadsheetId: string): Promise<Omit<PullStartInput, 'runBy'> | null> {
-  let job: PreviewJob | null = null
+  let job: PreviewJobLight | null = null
   try {
-    job = await getPreviewJob(previewJobId)
+    job = await getPreviewJobLight(previewJobId)
   } catch {
     return null
   }

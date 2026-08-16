@@ -15,9 +15,9 @@ import { getConnection, stampLastPush, stampLastPushAttempt, setVariationTabMani
 import { gridHash } from '@/modules/google-sheet-products-for-shop/lib/grid-hash'
 import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-log'
 import {
-  getPushJob, getPushJobStatus, updatePushJob, claimPushStepLease, releasePushStepLease,
+  getPushJobLight, getPushJobForStep, getPushJobStatus, updatePushJob, claimPushStepLease, releasePushStepLease,
 } from '@/modules/google-sheet-products-for-shop/lib/push-job'
-import type { PushJob, PushStatus, PushVariationTab } from '@/modules/google-sheet-products-for-shop/lib/types'
+import type { PushJob, PushJobLight, PushStatus, PushVariationTab } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // How long one /push/step keeps STARTING new tab batches. The platform kills a
 // module route at sixty seconds - a cliff, not a target - so the gap to it is the
@@ -49,7 +49,7 @@ const SYNC_SKEW_MS = 120_000
 // than any single request can live, so a lease only ever expires on a dead step.
 const STEP_LEASE_MS = 90_000
 
-export function pushStatus(job: PushJob): PushStatus {
+export function pushStatus(job: PushJobLight): PushStatus {
   return {
     pushJobId: job.id,
     status: job.status,
@@ -102,7 +102,7 @@ async function deleteOrphanVariationTabs(spreadsheetId: string, keep: Set<string
 // Close the job exactly once: flip to COMPLETED atomically, write the audit rows,
 // stamp the push and clear the snapshot. Mirrors finalizePullJob - only the worker
 // that wins the flip writes the logs, so a crash-and-retry cannot duplicate them.
-async function finalizePushJob(job: PushJob): Promise<void> {
+async function finalizePushJob(job: PushJobLight): Promise<void> {
   if (job.status === 'CANCELLED' || (await getPushJobStatus(job.id)) === 'CANCELLED') return
   const claimed = await prisma.$queryRaw<Array<{ id: string }>>`
     UPDATE "gsp_push_job" SET "status" = 'COMPLETED', "phase" = 'DONE', "updated_at" = CURRENT_TIMESTAMP
@@ -282,7 +282,8 @@ async function runPushStep(job: PushJob): Promise<void> {
       await setVariationTabManifest(manifest)
       await stampLastPush()
       await updatePushJob(jobId, { suppliersRows: suppliers.rowCount })
-      const reloaded = await getPushJob(jobId)
+      // Light: finalising reads the counters and the runner, never a snapshot.
+      const reloaded = await getPushJobLight(jobId)
       if (reloaded) await finalizePushJob(reloaded)
     } else {
       // phase DONE but not COMPLETED - a finalize that crashed mid-write. Redo it.
@@ -298,15 +299,19 @@ async function runPushStep(job: PushJob): Promise<void> {
 // Run exactly one bounded slice of the Push and return the live snapshot. Safe to
 // call repeatedly (the browser loops it) and safe to resume: every phase is
 // idempotent. Returns null if the job is gone.
+// As with the check: of the reads this makes per step, only one wants a
+// snapshot. The rest were paying for the catalogue to find out whether the job
+// had finished.
 export async function stepPushJob(jobId: string): Promise<PushStatus | null> {
-  const job = await getPushJob(jobId)
+  const job = await getPushJobLight(jobId)
   if (!job) return null
   if (job.status === 'COMPLETED' || job.status === 'CANCELLED') return pushStatus(job)
 
   const lease = await claimPushStepLease(jobId, STEP_LEASE_MS)
   if (lease) {
     try {
-      const fresh = await getPushJob(jobId)
+      // The one heavy read, and only the snapshot its own phase writes from.
+      const fresh = await getPushJobForStep(jobId)
       if (fresh && fresh.status !== 'COMPLETED' && fresh.status !== 'CANCELLED') await runPushStep(fresh)
     } catch (err) {
       // Only the lease/read machinery's own failures land here - a phase error is
@@ -321,6 +326,6 @@ export async function stepPushJob(jobId: string): Promise<PushStatus | null> {
     }
   }
 
-  const after = await getPushJob(jobId)
+  const after = await getPushJobLight(jobId)
   return after ? pushStatus(after) : null
 }

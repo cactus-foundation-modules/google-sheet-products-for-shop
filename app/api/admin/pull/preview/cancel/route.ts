@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { cancelPreviewJob, getPreviewJob } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
+import { cancelPreviewJob, getPreviewJobLight } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
 import { previewStatus } from '@/modules/google-sheet-products-for-shop/lib/preview-run'
 
 // Abandon a check. Nothing to undo - a check writes nothing to the catalogue -
@@ -19,6 +19,6 @@ export async function POST(req: NextRequest) {
   if (!previewJobId) return errorResponse('Missing previewJobId', 400)
 
   await cancelPreviewJob(previewJobId)
-  const job = await getPreviewJob(previewJobId)
+  const job = await getPreviewJobLight(previewJobId)
   return NextResponse.json({ ok: true, status: job ? previewStatus(job) : null })
 }

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { getPushJob, getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
+import { getPushJobLight, getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { pushStatus } from '@/modules/google-sheet-products-for-shop/lib/push-run'
 
 // The live snapshot the progress UI polls. With a pushJobId it returns that job's
@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   if (!(await hasPermission(user, 'googlesheets.manage'))) return errorResponse('Forbidden', 403)
 
   const id = req.nextUrl.searchParams.get('pushJobId')
-  const job = id ? await getPushJob(id) : await getLatestUnfinishedPushJob()
+  const job = id ? await getPushJobLight(id) : await getLatestUnfinishedPushJob()
   if (!job) return NextResponse.json({ status: null })
   return NextResponse.json({ status: pushStatus(job) })
 }

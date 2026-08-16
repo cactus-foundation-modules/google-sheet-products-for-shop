@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
-import { cancelPushJob, getPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
+import { cancelPushJob, getPushJobLight } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { pushStatus } from '@/modules/google-sheet-products-for-shop/lib/push-run'
 
 // Abandon a Push, whether paused, failed, or running. Tabs already written stay as
@@ -19,6 +19,6 @@ export async function POST(req: NextRequest) {
   if (!pushJobId) return errorResponse('Missing pushJobId', 400)
 
   await cancelPushJob(pushJobId)
-  const job = await getPushJob(pushJobId)
+  const job = await getPushJobLight(pushJobId)
   return NextResponse.json({ ok: true, status: job ? pushStatus(job) : null })
 }
