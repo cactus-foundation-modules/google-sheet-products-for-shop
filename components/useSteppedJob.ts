@@ -35,10 +35,20 @@ export function failureText(res: Response, body: { error?: unknown }, fallback: 
   return `${fallback} Your site answered with an error (HTTP ${res.status}) rather than a reason.`
 }
 
-// How many times a step may fail in a row before we stop and offer Continue. A
-// failure that follows real progress resets the count, so a long run with the odd
-// hiccup keeps going; only a genuinely stuck one ever surfaces.
-const MAX_STEP_RETRIES = 5
+// How many times a step may fail in a row before we stop and offer Continue, and
+// how long to wait between tries. A failure that follows real progress resets the
+// count, so a long run with the odd hiccup keeps going; only a genuinely stuck one
+// ever surfaces.
+//
+// Eight tries spanning about two minutes, not five spanning thirty seconds. The
+// thirty-second budget was set against the sort of failure that repeats
+// instantly; the one that actually turned up was a database briefly refusing
+// connections under load, which outlasted the whole budget and threw away three
+// and a half minutes of completed work. Infrastructure recovers on its own if you
+// let it, and the cost of waiting is a slower message on a job that was going to
+// fail anyway.
+const MAX_STEP_RETRIES = 8
+const MAX_RETRY_BACKOFF_MS = 20_000
 const POLL_MS = 1500
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
 
@@ -172,7 +182,9 @@ export function useSteppedJob<S extends SteppedStatus>(cfg: {
           setError(`${failReason} It was retried ${MAX_STEP_RETRIES} times without getting further - press Continue to keep trying, or Cancel.`)
           break
         }
-        await sleep(Math.min(2000 * attemptsSinceProgress, 8000))
+        // Doubling, not linear: a blip clears in seconds and a real outage should
+        // not be hammered. 2s, 4s, 8s, 16s, then a steady 20s.
+        await sleep(Math.min(2000 * 2 ** (attemptsSinceProgress - 1), MAX_RETRY_BACKOFF_MS))
       }
     } finally {
       looping.current = false

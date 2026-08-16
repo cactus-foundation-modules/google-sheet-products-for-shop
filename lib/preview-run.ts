@@ -4,6 +4,7 @@ import {
   getSheetIds, getSheetModifiedTime, readGrid, readHeaderRows, readGridsBatch, sheetFailureReason, SheetsApiError,
 } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
+import { describeFailure, OwnerMessageError } from '@/modules/google-sheet-products-for-shop/lib/failure'
 import { batchGetGroups } from '@/modules/google-sheet-products-for-shop/lib/batch-ranges'
 import { TAB } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import {
@@ -99,7 +100,7 @@ function mayStartChunk(chunksDone: number, startedAt: number): boolean {
 // What a phase says when its setup alone has used up the request. Loud on
 // purpose: silence here is what a wedged job looks like from the outside.
 function setupTooSlow(what: string): Error {
-  return new Error(
+  return new OwnerMessageError(
     `Loading your ${what} took so long that there was no time left to compare anything. ` +
     'This usually clears on its own - if it keeps happening, your catalogue has outgrown what one pass can do.',
   )
@@ -116,7 +117,7 @@ export const PREVIEW_LIST_CAP = 200
 // failed step five times before it gives up, which for a settled answer like
 // these is half a minute of the owner watching nothing happen before they get to
 // read what to do. Flagged on the job, the retry loop stops at once.
-class SettledError extends Error {}
+class SettledError extends OwnerMessageError {}
 
 // Will trying this again ever help?
 //
@@ -341,7 +342,7 @@ async function runReadPhase(job: PreviewJob, spreadsheetId: string, startedAt: n
 
 async function runProductsPhase(job: PreviewJob, startedAt: number): Promise<void> {
   const grid = job.productsGrid
-  if (!grid) throw new Error('The check lost its copy of the Products tab. Start it again.')
+  if (!grid) throw new OwnerMessageError('The check lost its copy of the Products tab. Start it again.')
   const preview = job.preview ?? emptyPreview()
   // Say we are alive before the long bit. Loading the catalogue to compare
   // against writes nothing until its first chunk lands, and a job that writes
@@ -413,7 +414,7 @@ async function runProductsPhase(job: PreviewJob, startedAt: number): Promise<voi
 async function runDeletionsPhase(job: PreviewJob): Promise<void> {
   const productsGrid = job.productsGrid
   const variationsGrid = job.variationsGrid
-  if (!productsGrid || !variationsGrid) throw new Error('The check lost its copy of the sheet. Start it again.')
+  if (!productsGrid || !variationsGrid) throw new OwnerMessageError('The check lost its copy of the sheet. Start it again.')
   const preview = job.preview ?? emptyPreview()
 
   // Both bulk queries: one paged catalogue read and one batched load of every
@@ -452,7 +453,7 @@ async function runDeletionsPhase(job: PreviewJob): Promise<void> {
 
 async function runVariationsPhase(job: PreviewJob, startedAt: number): Promise<void> {
   const grid = job.variationsGrid
-  if (!grid) throw new Error('The check lost its copy of your product tabs. Start it again.')
+  if (!grid) throw new OwnerMessageError('The check lost its copy of your product tabs. Start it again.')
   const preview = job.preview ?? emptyPreview()
   await heartbeatPreviewJob(job.id)
   const ctx = await prepareVariationDiff(grid)
@@ -570,7 +571,7 @@ async function runPreviewStep(job: PreviewJob): Promise<void> {
   const startedAt = Date.now()
   try {
     const conn = await getConnection()
-    if (!conn?.spreadsheetId) throw new Error('The Google Sheet connection is missing its spreadsheet.')
+    if (!conn?.spreadsheetId) throw new OwnerMessageError('The Google Sheet connection is missing its spreadsheet.')
 
     if (job.phase === 'READ') await runReadPhase(job, conn.spreadsheetId, startedAt)
     else if (job.phase === 'PRODUCTS') await runProductsPhase(job, startedAt)
@@ -584,8 +585,18 @@ async function runPreviewStep(job: PreviewJob): Promise<void> {
     // retries the same slice once the cause clears. Google's own failures get the
     // plain-English reading; anything else says what it said. A settled answer is
     // flagged so the browser stops asking rather than retrying it five times.
-    const reason = err instanceof GoogleAuthError ? err.message : sheetFailureReason(err)
-    await updatePreviewJob(job.id, { status: 'FAILED', error: reason, fatal: isSettled(err), currentItem: null })
+    // The owner gets a sentence; the log gets the specifics. A database that was
+    // briefly out of reach is never fatal - the cursor is intact, the next step
+    // carries on, and the only thing that changes is how long the browser is
+    // willing to keep asking.
+    const failure = describeFailure(err, 'check')
+    console.error('[google-sheet-products-for-shop/preview] step failed:', failure.detail)
+    await updatePreviewJob(job.id, {
+      status: 'FAILED',
+      error: failure.message,
+      fatal: isSettled(err) && !failure.transient,
+      currentItem: null,
+    })
   }
 }
 
@@ -608,9 +619,9 @@ export async function stepPreviewJob(jobId: string): Promise<PreviewStatus | nul
       // the browser sees a reason and a Continue rather than looping on a stale
       // snapshot for ever.
       // Message only - a database error object can carry the datasource URL.
-      const reason = err instanceof Error ? err.message : 'Unknown error'
-      console.error('[google-sheet-products-for-shop] preview step failed:', reason)
-      await updatePreviewJob(jobId, { status: 'FAILED', error: `The check could not run: ${reason}` }).catch(() => {})
+      const failure = describeFailure(err, 'check')
+      console.error('[google-sheet-products-for-shop] preview step failed:', failure.detail)
+      await updatePreviewJob(jobId, { status: 'FAILED', error: failure.message }).catch(() => {})
     } finally {
       await releasePreviewStepLease(jobId, lease)
     }

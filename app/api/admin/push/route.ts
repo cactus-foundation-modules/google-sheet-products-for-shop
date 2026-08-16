@@ -7,7 +7,8 @@ import { getLatestUnfinishedPullJob } from '@/modules/google-sheet-products-for-
 import { createPushJob, getLatestUnfinishedPushJob, PushAlreadyRunningError } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import { pushStatus } from '@/modules/google-sheet-products-for-shop/lib/push-run'
 import { getRunningPreviewJob, expireStalePreviewJobs } from '@/modules/google-sheet-products-for-shop/lib/preview-job'
-import { getSheetModifiedTime, sheetFailureReason } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { getSheetModifiedTime } from '@/modules/google-sheet-products-for-shop/lib/sheets'
+import { describeFailure } from '@/modules/google-sheet-products-for-shop/lib/failure'
 import { GoogleAuthError } from '@/modules/google-sheet-products-for-shop/lib/google-token'
 
 // Only absorbs clock skew between Google's modifiedTime and the database clock; a
@@ -91,7 +92,11 @@ export async function POST(req: NextRequest) {
         ? NextResponse.json({ pushJobId: again.id, resume: true, status: pushStatus(again) }, { status: 409 })
         : errorResponse('A push is already in progress.', 409)
     }
-    const message = err instanceof GoogleAuthError ? err.message : `The push could not start. ${sheetFailureReason(err)}`
-    return errorResponse(message, err instanceof GoogleAuthError ? 400 : 502)
+    // Same rule as a failing step: the owner reads a sentence, the log keeps the
+    // specifics. Starting a push touches the database as well as Google, so this
+    // path can carry a connection error and must not print one.
+    const failure = describeFailure(err, 'push')
+    console.error('[google-sheet-products-for-shop/push] could not start:', failure.detail)
+    return errorResponse(failure.message, err instanceof GoogleAuthError ? 400 : 502)
   }
 }

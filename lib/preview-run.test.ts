@@ -33,6 +33,10 @@ const advance = (ms: number) => { now += ms }
 // test below turns this up past the budget deliberately.
 let productSetupCostMs = 2_000
 
+// Set to make the NEXT products chunk throw, standing in for the database being
+// briefly out of reach mid-check. Cleared as it fires, so exactly one chunk fails.
+let failNextProductChunk: Error | null = null
+
 // --- the in-memory job row, standing in for gsp_preview_job -----------------
 
 let job: PreviewJob
@@ -155,6 +159,7 @@ vi.mock('@/modules/google-sheet-products-for-shop/lib/pull-diff', async (importO
     }),
     diffProductRowRange: vi.fn(async (ctx: { grid: string[][] }, from: number, to: number) => {
       advance(1_500)
+      if (failNextProductChunk) { const e = failNextProductChunk; failNextProductChunk = null; throw e }
       const out = []
       for (let r = from; r < Math.min(to, ctx.grid.length); r++) {
         // Every third row has work in it, so the filtered grid is a real subset.
@@ -222,6 +227,7 @@ describe('the sheet check, driven step by step at a real catalogue size', () => 
   beforeEach(() => {
     now = 1_700_000_000_000
     productSetupCostMs = 2_000
+    failNextProductChunk = null
     job = freshJob()
     writeCount = 0
     swallowNextWrite = false
@@ -371,6 +377,37 @@ describe('the sheet check, driven step by step at a real catalogue size', () => 
     expect(job.productsDone).toBe(PRODUCT_ROWS)
     const p = job.preview!.products
     // Nothing counted twice by the resume.
+    expect(p.toUpdateTotal + p.unchanged + p.toCreateTotal + p.rowErrorsTotal).toBe(PRODUCT_ROWS)
+  })
+
+  // The live failure: a pooler refused a connection mid-check and three and a
+  // half minutes of completed work went in the bin. A blip must cost the chunk it
+  // interrupted and nothing else - not the run, and not the owner's patience with
+  // a wall of Prisma.
+  it('survives a database blip and still completes, counting every row once', async () => {
+    // Get as far as the products compare, then make its next chunk hit a database
+    // that is briefly out of reach.
+    for (let i = 0; i < 20 && job.phase !== 'PRODUCTS'; i++) await stepPreviewJob('job-1')
+    expect(job.phase).toBe('PRODUCTS')
+
+    failNextProductChunk = new Error("Can't reach database server at `db.example:6432`")
+    const afterBlip = await stepPreviewJob('job-1')
+
+    expect(afterBlip?.status).toBe('FAILED')
+    // NOT fatal: the browser is meant to keep asking, which is the whole fix.
+    expect(afterBlip?.fatal).toBe(false)
+    // And what the owner reads is a sentence, not a hostname and a port.
+    expect(afterBlip?.error).not.toMatch(/6432|prisma|queryRaw/i)
+    expect(afterBlip?.error).toMatch(/nothing has been lost/i)
+
+    // Carrying on finishes the job, with every row counted exactly once - the
+    // failed chunk is redone, not skipped and not double-counted.
+    const { steps } = await runToCompletion()
+    expect(steps).toBeGreaterThan(0)
+    expect(job.status).toBe('COMPLETED')
+    expect(job.productsDone).toBe(PRODUCT_ROWS)
+    expect(job.variationsDone).toBe(PARENT_COUNT)
+    const p = job.preview!.products
     expect(p.toUpdateTotal + p.unchanged + p.toCreateTotal + p.rowErrorsTotal).toBe(PRODUCT_ROWS)
   })
 

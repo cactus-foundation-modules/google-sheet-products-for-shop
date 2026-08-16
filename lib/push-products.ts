@@ -33,7 +33,7 @@ function normaliseHeader(label: string): string {
 // connection pool is shared with everything else the admin is doing, so this
 // stays modest; it is still the difference between a few seconds and a few
 // hundred round trips taken strictly one after the other.
-const PRODUCT_COLUMN_CONCURRENCY = 8
+const PRODUCT_COLUMN_CONCURRENCY = 4
 
 // Cells go into the sheet as the type they actually are. Writing a price as the
 // string "100" makes a text cell, which Sheets shows as '100 and refuses to sum,

@@ -2,7 +2,9 @@ import { bulkDeleteProducts } from '@/modules/shop/lib/db/products'
 import type { ProductDeletion, VariantDeletion } from '@/modules/google-sheet-products-for-shop/lib/deletions'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-const msg = (err: unknown) => (err instanceof Error ? err.message : 'unknown error')
+import { rowFailureReason } from '@/modules/google-sheet-products-for-shop/lib/failure'
+
+const msg = (err: unknown) => rowFailureReason(err, 'unknown error')
 
 // Products the sheet no longer lists (and that predate the last push) are removed
 // outright. Deleting a product cascades its variant children and svr_ rows away;

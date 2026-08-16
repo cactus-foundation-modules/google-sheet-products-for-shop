@@ -8,6 +8,7 @@ import {
   descriptionPuckChanged,
   readDescriptionPuckCell,
 } from '@/modules/google-sheet-products-for-shop/lib/description-puck'
+import { rowFailureReason } from '@/modules/google-sheet-products-for-shop/lib/failure'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // The designed-description column, applied after shop's import engine has run
@@ -69,7 +70,7 @@ export async function applyDescriptionPuckPass(
       await updateProduct(match.productId, { descriptionPuck: read.kind === 'clear' ? null : read.data })
       updated++
     } catch (err) {
-      errors.push({ row: sheetRowFor(match.dataIndex), reason: err instanceof Error ? err.message : 'Description design update failed' })
+      errors.push({ row: sheetRowFor(match.dataIndex), reason: rowFailureReason(err, 'Description design update failed') })
     }
   }
 

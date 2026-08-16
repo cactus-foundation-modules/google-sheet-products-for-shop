@@ -10,6 +10,7 @@ import { writeSyncLog } from '@/modules/google-sheet-products-for-shop/lib/sync-
 import { stampLastPull } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { getPullJob, getPullJobStatus, updatePullJob } from '@/modules/google-sheet-products-for-shop/lib/pull-job'
 import { prisma } from '@/lib/db/prisma'
+import { describeFailure, OwnerMessageError } from '@/modules/google-sheet-products-for-shop/lib/failure'
 import type { PullJob, PullStatus } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // How many variation rows land in one importer call. Each call carries a fixed
@@ -314,7 +315,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
   const jobId = job.id
   try {
     if (job.phase === 'PRODUCTS') {
-      if (!job.productsGrid || !job.shopImportJobId) throw new Error('Pull job is missing its products snapshot.')
+      if (!job.productsGrid || !job.shopImportJobId) throw new OwnerMessageError('Pull job is missing its products snapshot.')
       const header = job.productsGrid[0] ?? []
       const dataRows = job.productsGrid.slice(1)
       const stepStartedAt = Date.now()
@@ -386,7 +387,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         await updatePullJob(jobId, { phase: 'DELETIONS', status: 'RUNNING', error: null, currentItem: null, currentOffset: 0 })
       }
     } else if (job.phase === 'DELETIONS') {
-      if (!job.productsGrid || !job.variationsGrid) throw new Error('Pull job is missing its sheet snapshot.')
+      if (!job.productsGrid || !job.variationsGrid) throw new OwnerMessageError('Pull job is missing its sheet snapshot.')
       // Deletes only. The status column is now honoured by shop's import engine
       // itself, and the product-attribute pass runs alongside the products chunks
       // - so all that is left here is the deletion plan captured at start against
@@ -452,7 +453,7 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         })
       }
     } else if (job.phase === 'VARIATIONS') {
-      if (!job.variationsGrid) throw new Error('Pull job is missing its variations snapshot.')
+      if (!job.variationsGrid) throw new OwnerMessageError('Pull job is missing its variations snapshot.')
       const header = job.variationsGrid[0] ?? []
       // Group the filtered rows so every row of a parent sits together, then chunk
       // on parent boundaries. The importer's value-rename pass (e.g. "Red" typed
@@ -525,8 +526,12 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
     // The in-chunk offset goes with it: the retry re-runs that chunk from the
     // banked cursor, so leaving the offset up would show a count that is ahead of
     // what actually landed for as long as the job sits paused.
+    // Owner-facing sentence on the job, specifics in the log. A database blip
+    // mid-import is exactly the case this must not turn into a wall of Prisma.
+    const failure = describeFailure(err, 'pull')
+    console.error('[google-sheet-products-for-shop/pull] step failed:', failure.detail)
     await updatePullJob(jobId, {
-      status: 'FAILED', error: err instanceof Error ? err.message : 'Unknown error',
+      status: 'FAILED', error: failure.message,
       currentItem: null, currentOffset: 0,
     })
   }
@@ -568,9 +573,9 @@ export async function stepPullJob(jobId: string, adminEmail: string): Promise<Pu
     // Message only, like every other log in this module: a database error object
     // can carry the datasource URL, and this one goes straight to the platform's
     // log where the owner's connection string has no business being.
-    const reason = err instanceof Error ? err.message : 'Unknown error'
-    console.error('[google-sheet-products-for-shop] pull step lock failed:', reason)
-    await updatePullJob(jobId, { status: 'FAILED', error: `A pull step could not run: ${reason}` }).catch(() => {})
+    const failure = describeFailure(err, 'pull')
+    console.error('[google-sheet-products-for-shop] pull step lock failed:', failure.detail)
+    await updatePullJob(jobId, { status: 'FAILED', error: failure.message }).catch(() => {})
   }
 
   const after = await getPullJob(jobId)

@@ -1,5 +1,6 @@
 import { resolveProductFieldProviders } from '@/modules/shop/lib/product-field-providers'
 import { matchRowsToProducts } from '@/modules/google-sheet-products-for-shop/lib/row-products'
+import { rowFailureReason } from '@/modules/google-sheet-products-for-shop/lib/failure'
 import type { SyncRowError } from '@/modules/google-sheet-products-for-shop/lib/types'
 
 // shop's import engine only knows the fixed CSV columns, so a product-level
@@ -48,7 +49,7 @@ export async function applyProductFieldsPass(
       try {
         if (await provider.applyImportedRow(match.productId, rowRecord, ctx.get(id))) rowChanged = true
       } catch (err) {
-        errors.push({ row: sheetRowFor(match.dataIndex), reason: err instanceof Error ? err.message : 'Attribute update failed' })
+        errors.push({ row: sheetRowFor(match.dataIndex), reason: rowFailureReason(err, 'Attribute update failed') })
       }
     }
     if (rowChanged) updated++

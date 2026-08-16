@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/prisma'
+import { describeFailure, OwnerMessageError } from '@/modules/google-sheet-products-for-shop/lib/failure'
 import { pushProductsGrid, buildProductsGrid } from '@/modules/google-sheet-products-for-shop/lib/push-products'
 import { pushVariationTabsBatch, buildVariationTabs } from '@/modules/google-sheet-products-for-shop/lib/push-variations'
 import { columnPrefsFrom } from '@/modules/google-sheet-products-for-shop/lib/columns'
@@ -18,10 +19,12 @@ import {
 } from '@/modules/google-sheet-products-for-shop/lib/push-job'
 import type { PushJob, PushStatus, PushVariationTab } from '@/modules/google-sheet-products-for-shop/lib/types'
 
-// How long one /push/step keeps starting new tab batches. Well under the module
-// dispatcher's 60s ceiling so the slowest single batch still finishes and banks
-// its cursor before the platform kills the request. Same value the Pull uses.
-const STEP_TIME_BUDGET_MS = 35_000
+// How long one /push/step keeps STARTING new tab batches. The platform kills a
+// module route at sixty seconds - a cliff, not a target - so the gap to it is the
+// room the batch already in flight has to finish in. Was 35s, which left only 25s
+// of headroom; a slow batch on top of that is a 504 the browser then retries, and
+// a failed request in the owner's monitoring for work that was going fine.
+const STEP_TIME_BUDGET_MS = 20_000
 
 // How many variation tabs go through one batched pushGrids call. All of a
 // group's reads travel in one spreadsheets.get and its writes in a handful of
@@ -119,7 +122,7 @@ async function runPushStep(job: PushJob): Promise<void> {
   const jobId = job.id
   try {
     const conn = await getConnection()
-    if (!conn?.spreadsheetId) throw new Error('The Google Sheet connection is missing its spreadsheet.')
+    if (!conn?.spreadsheetId) throw new OwnerMessageError('The Google Sheet connection is missing its spreadsheet.')
     const spreadsheetId: string = conn.spreadsheetId
 
     if (job.phase === 'BUILD_PRODUCTS') {
@@ -153,7 +156,7 @@ async function runPushStep(job: PushJob): Promise<void> {
         variationTabs, tabsTotal: variationTabs.length,
       })
     } else if (job.phase === 'PRODUCTS') {
-      if (!job.productsGrid) throw new Error('Push job is missing its products snapshot.')
+      if (!job.productsGrid) throw new OwnerMessageError('Push job is missing its products snapshot.')
       const res = await pushProductsGrid(spreadsheetId, job.productsGrid)
       await stampLastPushAttempt()
       await updatePushJob(jobId, {
@@ -161,7 +164,7 @@ async function runPushStep(job: PushJob): Promise<void> {
         productsRows: res.rowCount, formulasKept: job.formulasKept + res.preservedFormulas,
       })
     } else if (job.phase === 'VARIATION_TABS') {
-      if (!job.variationTabs) throw new Error('Push job is missing its variations snapshot.')
+      if (!job.variationTabs) throw new OwnerMessageError('Push job is missing its variations snapshot.')
       const tabs = job.variationTabs
       // One sheet-list read up front so an already-present tab costs no per-tab
       // existence check; only genuinely new tabs are created. The same read
@@ -235,7 +238,7 @@ async function runPushStep(job: PushJob): Promise<void> {
               }
               await stampLastPushAttempt()
             }
-            if (plan.overBudget) throw new Error(workbookFullMessage())
+            if (plan.overBudget) throw new OwnerMessageError(workbookFullMessage())
 
             const assigned = await createVariationTabsBatch(spreadsheetId, missing.map(plannedTab), Object.values(existing))
             for (const [title, id] of Object.entries(assigned)) {
@@ -286,7 +289,9 @@ async function runPushStep(job: PushJob): Promise<void> {
       await finalizePushJob(job)
     }
   } catch (err) {
-    await updatePushJob(jobId, { status: 'FAILED', error: err instanceof Error ? err.message : 'Unknown error' })
+    const failure = describeFailure(err, 'push')
+    console.error('[google-sheet-products-for-shop/push] step failed:', failure.detail)
+    await updatePushJob(jobId, { status: 'FAILED', error: failure.message })
   }
 }
 
@@ -308,9 +313,9 @@ export async function stepPushJob(jobId: string): Promise<PushStatus | null> {
       // caught inside runPushStep and recorded on the job. Record this too, so the
       // browser sees a reason and a Continue rather than looping on a stale snapshot.
       // Message only - a database error object can carry the datasource URL.
-      const reason = err instanceof Error ? err.message : 'Unknown error'
-      console.error('[google-sheet-products-for-shop] push step failed:', reason)
-      await updatePushJob(jobId, { status: 'FAILED', error: `A push step could not run: ${reason}` }).catch(() => {})
+      const failure = describeFailure(err, 'push')
+      console.error('[google-sheet-products-for-shop] push step failed:', failure.detail)
+      await updatePushJob(jobId, { status: 'FAILED', error: failure.message }).catch(() => {})
     } finally {
       await releasePushStepLease(jobId, lease)
     }
