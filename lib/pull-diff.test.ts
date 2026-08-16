@@ -16,6 +16,15 @@ const getVariantAttributeValues = vi.fn(
     'child-1': { 'asg-catalog': { valueId: 'v-spring', label: 'Spring' } },
   }),
 )
+// The batched twins the check now preloads through. Built from the SAME fixtures
+// as the per-parent ones above, which is the property under test: batching must
+// change how many round trips are made and nothing whatsoever about the answers.
+const listVariationColumnsForProducts = vi.fn(async (ids: string[]) =>
+  new Map(await Promise.all(ids.map(async (id) => [id, await listVariationColumns(id)] as const))),
+)
+const getVariantAttributeValuesForProducts = vi.fn(async (ids: string[], children: string[]) =>
+  getVariantAttributeValues(ids[0] ?? '', children),
+)
 const setVariantAttributeValue = vi.fn(async () => {})
 const ensureAttributeValueByLabel = vi.fn(async (_a: string, label: string): Promise<string | null> => `v-${label.toLowerCase()}`)
 // Read-only: a label the vocabulary has NOT seen yet has no id (null), exactly
@@ -31,6 +40,8 @@ vi.mock('@/modules/product-attributes-for-shop/components/admin/ProductAttribute
 vi.mock('@/modules/product-attributes-for-shop/lib/db/membership', () => ({
   listVariationColumns: (...a: unknown[]) => listVariationColumns(...(a as [string])),
   getVariantAttributeValues: (...a: unknown[]) => getVariantAttributeValues(...(a as [string, string[]])),
+  listVariationColumnsForProducts: (...a: unknown[]) => listVariationColumnsForProducts(...(a as [string[]])),
+  getVariantAttributeValuesForProducts: (...a: unknown[]) => getVariantAttributeValuesForProducts(...(a as [string[], string[]])),
   setVariantAttributeValue: (...a: unknown[]) => setVariantAttributeValue(),
   ensureAttributeValueByLabel: (...a: unknown[]) => ensureAttributeValueByLabel(...(a as [string, string])),
   findAttributeValueByLabel: (...a: unknown[]) => findAttributeValueByLabel(...(a as [string, string])),

@@ -425,6 +425,10 @@ export type VariationDiffContext = {
   payloadByParentId: Awaited<ReturnType<typeof getEditorPayloadsBatch>>
   providers: Awaited<ReturnType<typeof resolveVariantFieldProviders>>
   undiffableProviders: boolean
+  /** Provider id -> the context its BATCHED preload returned, covering every
+   *  parent at once. A provider that offers no batched form is absent here and
+   *  is preloaded per parent, as it always was. */
+  batchedProviderCtx: Map<string, unknown>
 }
 
 // Load everything the Variations diff compares against - one batch per thing,
@@ -437,7 +441,7 @@ export async function prepareVariationDiff(grid: string[][]): Promise<VariationD
       costPrice: -1, stock: -1, barcode: -1, supplier: -1, weight: -1, image: -1,
     },
     groups: [], preErrors: [], parentBySlug: new Map(), payloadByParentId: new Map(),
-    providers: [], undiffableProviders: false,
+    providers: [], undiffableProviders: false, batchedProviderCtx: new Map(),
   }
   if (grid.length < 2) return empty
 
@@ -495,10 +499,26 @@ export async function prepareVariationDiff(grid: string[][]): Promise<VariationD
   const parentBySlug = await getProductsBySlugs([...byslug.keys()])
   const payloadByParentId = await getEditorPayloadsBatch([...parentBySlug.values()])
 
+  // Preload every contributing module's state for EVERY parent in one go, where
+  // the module offers it. Asking each provider per parent is a round trip per
+  // parent per provider, and on this catalogue that was 184s and 148s for the two
+  // of them - the whole remaining cost of a check, none of it spent querying.
+  const batchedProviderCtx = new Map<string, unknown>()
+  const batchParents = [...parentBySlug.values()].map((parent) => ({
+    productId: parent.id,
+    childProductIds: (payloadByParentId.get(parent.id)?.variants ?? []).map((v) => v.childProductId),
+  }))
+  if (batchParents.length > 0) {
+    await Promise.all(allProviders.map(async ({ id, provider }) => {
+      if (provider.beginImportMany) batchedProviderCtx.set(id, await provider.beginImportMany(batchParents))
+    }))
+  }
+
   return {
     header, slugCol, idCol, optionPairs, fieldCol,
     groups: [...byslug].map(([slug, rows]) => ({ slug, rows })),
     preErrors, parentBySlug, payloadByParentId, providers, undiffableProviders,
+    batchedProviderCtx,
   }
 }
 
@@ -529,7 +549,7 @@ async function diffOneParent(
   rows: Array<{ row: number; cols: string[] }>,
   onParent?: (name: string) => void,
 ): Promise<VariationRowResult[]> {
-  const { header, idCol, optionPairs, fieldCol, parentBySlug, payloadByParentId, providers, undiffableProviders } = ctx
+  const { header, idCol, optionPairs, fieldCol, parentBySlug, payloadByParentId, providers, undiffableProviders, batchedProviderCtx } = ctx
   const results: VariationRowResult[] = []
   const parent = parentBySlug.get(slug)
   if (!parent) {
@@ -561,12 +581,15 @@ async function diffOneParent(
     // Preload each provider's current state for this parent's existing children,
     // exactly as the importer does, so rowChanged diffs in memory rather than
     // per row.
-    const providerCtx = new Map<string, unknown>()
-    if (providers.length > 0) {
+    // Whatever was preloaded for the whole catalogue is used as-is; only a
+    // provider with no batched form is asked about this parent on its own.
+    const providerCtx = new Map<string, unknown>(batchedProviderCtx)
+    const perParent = providers.filter(({ id, provider }) => !providerCtx.has(id) && provider.beginImport)
+    if (perParent.length > 0) {
       const childIds = (payload?.variants ?? []).map((v) => v.childProductId)
       // Providers preload independently of one another, so they preload together.
-      await Promise.all(providers.map(async ({ id, provider }) => {
-        if (provider.beginImport) providerCtx.set(id, await provider.beginImport(parent.id, childIds))
+      await Promise.all(perParent.map(async ({ id, provider }) => {
+        providerCtx.set(id, await provider.beginImport!(parent.id, childIds))
       }))
     }
 
