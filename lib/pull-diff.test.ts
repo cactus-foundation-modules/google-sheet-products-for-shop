@@ -46,9 +46,10 @@ vi.mock('@/modules/product-attributes-for-shop/lib/db/membership', () => ({
   ensureAttributeValueByLabel: (...a: unknown[]) => ensureAttributeValueByLabel(...(a as [string, string])),
   findAttributeValueByLabel: (...a: unknown[]) => findAttributeValueByLabel(...(a as [string, string])),
   // The Catalog attribute in these tests is already assigned to the product, so
-  // auto-assign never fires; an empty vocabulary keeps it that way.
+  // auto-attach never fires; an empty vocabulary keeps it that way.
   listAllAttributes: async () => [],
-  upsertProductAttribute: async () => null,
+  upsertVariationAttribute: async () => null,
+  listVariationAttachBlocks: async () => new Set<string>(),
 }))
 
 // --- shop / variations DB seams diffVariationRows imports ---
