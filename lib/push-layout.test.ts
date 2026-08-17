@@ -10,6 +10,7 @@ import {
   orderRowsLikeSheet,
   planFormulaPreservation,
 } from '@/modules/google-sheet-products-for-shop/lib/formula-preserve'
+import { planTabPush } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import { productsValidationRequests } from '@/modules/google-sheet-products-for-shop/lib/workbook'
 import type { SheetCell, CellValue } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
@@ -252,6 +253,68 @@ describe('a sheet whose columns the owner has rearranged', () => {
     expect(requests[0]!.setDataValidation.range).toMatchObject({ startColumnIndex: 0, endColumnIndex: 5 })
     const status = requests.filter((r) => r.setDataValidation.rule).map((r) => r.setDataValidation.range)
     expect(status).toEqual([{ sheetId: 7, startRowIndex: 1, endRowIndex: 5000, startColumnIndex: 1, endColumnIndex: 2 }])
+  })
+})
+
+// The owner writes an attach marker - a star after the name - in a spare column
+// to ask another module to stand that column up for real ("Shipping *" attaches
+// the Shipping attribute to the product; see product-attributes-for-shop). The
+// Pull attaches it, so the column now comes out of the database under its plain
+// name, and this Push has to write that OVER the marked heading.
+//
+// If it appended a second column beside the marked one instead, the star would sit
+// there being read again on every Pull - which is the loop that had auto-attach
+// taken out in the first place - and the values the owner typed under it would
+// fight the real column for ever.
+describe('a heading carrying an attach marker', () => {
+  const marked: SheetCell[][] = [
+    [v('sku'), v('slug'), v('name'), v('shipping *'), v('notes')],
+    [v('S1'), v('p1'), v('One'), v('Flat pack'), v('keep-1')],
+    [v('S2'), v('p2'), v('Two'), v('Pallet'), v('keep-2')],
+  ]
+  // The attribute is attached now, so the export carries a plain "shipping".
+  const exported: CellValue[][] = [
+    ['sku', 'slug', 'name', 'shipping'],
+    ['S1', 'p1', 'One', 'Flat pack'],
+    ['S2', 'p2', 'Two', 'Pallet'],
+  ]
+
+  it('claims the marked column\'s position rather than appending beside it', () => {
+    const aligned = orderColumnsLikeSheet({ oldGrid: marked, newGrid: exported })
+    expect(aligned[0]).toEqual(['sku', 'slug', 'name', 'shipping'])
+  })
+
+  it('is not mistaken for an owner column that has to be shifted right', () => {
+    const set = new Set(['sku', 'slug', 'name', 'shipping'])
+    const owns = (h: string) => ['sku', 'slug', 'name'].includes(h)
+    // Column 3 is the marked one - ours to overwrite. The owner's own starts at 4.
+    expect(ownerColumnStart(['sku', 'slug', 'name', 'shipping *', 'notes'], set, owns)).toBe(4)
+  })
+
+  it('overwrites the marker in place, keeping the owner\'s column and formulas', () => {
+    const withFormula: SheetCell[][] = [
+      marked[0]!,
+      [v('S1'), v('p1'), v('One'), f('="Flat pack"', 'Flat pack'), v('keep-1')],
+      marked[2]!,
+    ]
+    const owns = (h: string) => ['sku', 'slug', 'name', 'shipping'].includes(h)
+    const plan = planTabPush({ tab: 'T', grid: exported, keyStrategies: KEYS, ownsColumn: owns }, withFormula)
+    // No blank columns opened, nothing cleared, and the star is gone from A1's row.
+    expect(plan.insert).toBeNull()
+    expect(plan.clears).toEqual([])
+    expect(plan.grid[0]).toEqual(['sku', 'slug', 'name', 'shipping'])
+    // Header lines up, so the owner's formula in the marked column still survives.
+    expect(plan.preserved).toEqual([{ row: 1, col: 3, formula: '="Flat pack"' }])
+  })
+
+  it('leaves a marked heading alone when nothing has been attached', () => {
+    // No "shipping" column in the export - the attach was refused, or the owner
+    // simply typed a heading naming nothing. The star stays; it is their column.
+    const plain: CellValue[][] = [['sku', 'slug', 'name'], ['S1', 'p1', 'One'], ['S2', 'p2', 'Two']]
+    const set = new Set(['sku', 'slug', 'name'])
+    const owns = (h: string) => ['sku', 'slug', 'name'].includes(h)
+    expect(orderColumnsLikeSheet({ oldGrid: marked, newGrid: plain })[0]).toEqual(['sku', 'slug', 'name'])
+    expect(ownerColumnStart(['sku', 'slug', 'name', 'shipping *', 'notes'], set, owns)).toBe(3)
   })
 })
 

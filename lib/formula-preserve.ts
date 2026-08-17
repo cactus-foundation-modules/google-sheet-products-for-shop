@@ -77,6 +77,28 @@ function headerNames(row: readonly CellValue[]): string[] {
   return row.map((c) => String(c).trim())
 }
 
+// A heading the owner has written by hand may carry an ATTACH MARKER - a star
+// after the name, "Shipping *" - asking a module to stand that column up for real
+// rather than merely fill it. Product attributes uses it to attach an attribute to
+// a product as a variation column straight from the sheet.
+//
+// Nothing here knows or cares what gets attached. What this module owes the
+// mechanism is one thing: once the attach has happened, the column arrives from
+// the database under its plain name, and the Push must write that OVER the marked
+// heading rather than beside it. So a marked heading answers to its plain name
+// throughout the column alignment - it keeps its position, its formulas and the
+// values the owner typed under it, and the star disappears in the same write.
+//
+// That is what makes the marker a one-shot instruction. Left in place it would be
+// read again on every Pull, and a column deleted in the admin would keep coming
+// back - which is exactly how the first, marker-less version of auto-attach had to
+// be taken out.
+const ATTACH_MARKER = /\s*\*\s*$/
+
+export function unmarkedHeader(header: string): string {
+  return header.replace(ATTACH_MARKER, '').trim()
+}
+
 // Resolve each key strategy (column NAMES) to column INDICES in this header,
 // dropping any strategy whose columns the header does not all carry.
 function resolveStrategyColumns(newHeader: string[], keyStrategies: KeyStrategy[]): number[][] {
@@ -96,7 +118,9 @@ function resolveStrategyColumns(newHeader: string[], keyStrategies: KeyStrategy[
 function pushedColumnsAligned(oldHeader: string[], newHeader: string[]): boolean {
   for (let c = 0; c < newHeader.length; c++) {
     const old = oldHeader[c] ?? ''
-    if (old !== '' && old !== newHeader[c]) return false
+    // A marked heading standing where its plain twin now arrives is the same
+    // column, not a shift - the Push is about to consume the marker in place.
+    if (old !== '' && old !== newHeader[c] && unmarkedHeader(old) !== newHeader[c]) return false
   }
   return true
 }
@@ -112,7 +136,10 @@ export function ownerColumnStart(
 ): number {
   for (let c = 0; c < oldHeader.length; c++) {
     const h = oldHeader[c]
-    if (h && !newHeaderSet.has(h) && !ownsColumn(h)) return c
+    // A marked heading whose plain twin the pushed grid now carries is not owner
+    // data to be shifted out of the way: it is the column being stood up, and the
+    // Push writes the plain name straight over it.
+    if (h && !newHeaderSet.has(h) && !newHeaderSet.has(unmarkedHeader(h)) && !ownsColumn(h)) return c
   }
   return -1
 }
@@ -286,7 +313,13 @@ export function orderColumnsLikeSheet(params: {
   const oldPos = new Map<string, number>()
   for (let c = 0; c < oldHeader.length; c++) {
     const h = oldHeader[c] ?? ''
-    if (h !== '' && !oldPos.has(h)) oldPos.set(h, c)
+    if (h === '') continue
+    if (!oldPos.has(h)) oldPos.set(h, c)
+    // A marked heading also answers to its plain name, so a column that has just
+    // been attached claims the position the owner wrote the marker in rather than
+    // appending at the end and leaving the star behind.
+    const bare = unmarkedHeader(h)
+    if (bare !== '' && bare !== h && !oldPos.has(bare)) oldPos.set(bare, c)
   }
   const used = new Set<number>()
   const decorated = newHeader.map((h, i) => {
