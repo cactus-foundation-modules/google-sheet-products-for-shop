@@ -50,6 +50,7 @@ vi.mock('@/modules/product-attributes-for-shop/lib/db/membership', () => ({
   listAllAttributes: async () => [],
   upsertVariationAttribute: async () => null,
   listVariationAttachBlocks: async () => new Set<string>(),
+  listAutoAttachDeclines: async () => new Set<string>(),
 }))
 
 // --- shop / variations DB seams diffVariationRows imports ---
