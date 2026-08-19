@@ -337,7 +337,7 @@ function numCell(s: string): number | undefined {
 function variationRowChanged(
   v: VariantEditorRow,
   cols: string[],
-  col: { sku: number; saleSku: number; price: number; salePrice: number; rrp: number; tradePrice: number; costPrice: number; stock: number; barcode: number; supplier: number; weight: number; image: number },
+  col: { sku: number; saleSku: number; price: number; salePrice: number; rrp: number; tradePrice: number; costPrice: number; stock: number; minQty: number; barcode: number; supplier: number; weight: number; image: number },
 ): boolean {
   const cell = (i: number) => (cols[i] ?? '').trim()
   // Every number compares through numbersMatch, the float tolerance Push's
@@ -368,6 +368,14 @@ function variationRowChanged(
   const numChanged = (a: number | null, b: number | null): boolean =>
     a === null || b === null ? a !== b : !numbersMatch(a, b)
   if (col.stock >= 0 && numChanged(v.stockCount ?? null, numCell(cell(col.stock)) ?? null)) return true
+  // Smallest order. The importer reads 1, 0 and a blank cell all as "no minimum
+  // of its own" (null), so the comparison has to normalise the same way or every
+  // row carrying a 1 would read as an edit on every Pull, forever.
+  if (col.minQty >= 0) {
+    const raw = numCell(cell(col.minQty))
+    const next = raw != null && raw > 1 ? Math.floor(raw) : null
+    if (numChanged(v.minOrderQuantity ?? null, next)) return true
+  }
   if (col.weight >= 0 && numChanged(v.weight ?? null, numCell(cell(col.weight)) ?? null)) return true
   if (col.image >= 0) {
     const urls = parseVariantImages(cell(col.image))
@@ -415,7 +423,7 @@ export type VariationDiffContext = {
   optionPairs: Array<{ nameCol: number; valueCol: number }>
   fieldCol: {
     sku: number; saleSku: number; price: number; salePrice: number; rrp: number; tradePrice: number
-    costPrice: number; stock: number; barcode: number; supplier: number; weight: number; image: number
+    costPrice: number; stock: number; minQty: number; barcode: number; supplier: number; weight: number; image: number
   }
   /** Parent groups in sheet order - the unit the cursor counts in. */
   groups: Array<{ slug: string; rows: Array<{ row: number; cols: string[] }> }>
@@ -438,7 +446,7 @@ export async function prepareVariationDiff(grid: string[][]): Promise<VariationD
     header: [], slugCol: -1, idCol: -1, optionPairs: [],
     fieldCol: {
       sku: -1, saleSku: -1, price: -1, salePrice: -1, rrp: -1, tradePrice: -1,
-      costPrice: -1, stock: -1, barcode: -1, supplier: -1, weight: -1, image: -1,
+      costPrice: -1, stock: -1, minQty: -1, barcode: -1, supplier: -1, weight: -1, image: -1,
     },
     groups: [], preErrors: [], parentBySlug: new Map(), payloadByParentId: new Map(),
     providers: [], undiffableProviders: false, batchedProviderCtx: new Map(),
@@ -461,7 +469,7 @@ export async function prepareVariationDiff(grid: string[][]): Promise<VariationD
   const fieldCol = {
     sku: idx('Variant SKU'), saleSku: idx('Sale SKU'), price: idx('Price'),
     salePrice: idx('Sale Price'), rrp: idx('RRP'), tradePrice: idx('Trade Price'), costPrice: idx('Cost Price'),
-    stock: idx('Stock'),
+    stock: idx('Stock'), minQty: idx('Min Qty'),
     barcode: idx('Barcode'), supplier: idx('Supplier'), weight: idx('Weight'), image: idx('Image'),
   }
   const idCol = idx('Variant ID')
