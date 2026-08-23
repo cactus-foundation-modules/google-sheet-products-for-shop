@@ -11,7 +11,7 @@ import {
   MIN_COLUMNS,
   type SheetGrid,
 } from '@/modules/google-sheet-products-for-shop/lib/capacity'
-import { resizeRequests } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
+import { resizeRequests, rowPadForDeletes } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import type { TabPushPlan } from '@/modules/google-sheet-products-for-shop/lib/push-grid'
 import type { SheetCell } from '@/modules/google-sheet-products-for-shop/lib/sheets'
 
@@ -195,5 +195,35 @@ describe('resizeRequests', () => {
   it('leaves a tab alone when the sheet no longer has it', () => {
     const plans = [plan({ tab: 'Gone', grid: [['a']] })]
     expect(resizeRequests(plans, {}, {})).toEqual([])
+  })
+})
+
+describe('rowPadForDeletes', () => {
+  it('asks for nothing when there is nothing to delete', () => {
+    expect(rowPadForDeletes({ rowCount: 41, frozenRowCount: 1 }, 0)).toBe(0)
+  })
+
+  it('asks for nothing while a row would be left standing', () => {
+    // A header, forty products, thirty-nine of them gone. One survives, so the
+    // delete is ordinary.
+    expect(rowPadForDeletes({ rowCount: 41, frozenRowCount: 1 }, 39)).toBe(0)
+  })
+
+  it('asks for one row when every non-frozen row is doomed', () => {
+    // The tab is sized to exactly its content and the header is frozen, so all
+    // forty data rows departing is a delete Google refuses outright.
+    expect(rowPadForDeletes({ rowCount: 41, frozenRowCount: 1 }, 40)).toBe(1)
+  })
+
+  it('counts an unfrozen header as deletable, and still keeps one row back', () => {
+    // The owner has unfrozen the header. Nothing deletes row 0 anyway, so 40 of
+    // 41 deletable rows leaves one - no padding needed.
+    expect(rowPadForDeletes({ rowCount: 41, frozenRowCount: 0 }, 40)).toBe(0)
+    expect(rowPadForDeletes({ rowCount: 41 }, 41)).toBe(1)
+  })
+
+  it('covers the shortfall when the tab is smaller than the delete', () => {
+    expect(rowPadForDeletes({ rowCount: 2, frozenRowCount: 1 }, 1)).toBe(1)
+    expect(rowPadForDeletes({ rowCount: 5, frozenRowCount: 2 }, 5)).toBe(3)
   })
 })

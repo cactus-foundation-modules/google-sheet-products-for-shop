@@ -54,8 +54,10 @@ export const MIN_COLUMNS = 1
 // workbook looks like a spreadsheet rather than a slot.
 export const CREATED_TAB_COLUMNS = 26
 
-// One tab's grid dimensions, as spreadsheets.get reports them.
-export type SheetGrid = { sheetId: number; rowCount: number; columnCount: number }
+// One tab's grid dimensions, as spreadsheets.get reports them. The frozen row
+// count matters to more than the look of the thing: Google refuses a row delete
+// that would take every non-frozen row with it (see rowPadForDeletes).
+export type SheetGrid = { sheetId: number; rowCount: number; columnCount: number; frozenRowCount?: number }
 
 // The size a tab holding `needed` rows/columns of content should be given.
 export function targetRows(needed: number): number {

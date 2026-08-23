@@ -426,11 +426,11 @@ export async function getSheetIds(spreadsheetId: string): Promise<Record<string,
 // ceiling needs the sizes, not just the ids (see lib/capacity.ts).
 export async function getSheetGrids(spreadsheetId: string): Promise<Record<string, SheetGrid>> {
   const res = await ok(
-    await googleFetch(`${SHEETS_API}/${spreadsheetId}?fields=sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))`, { method: 'GET' }),
+    await googleFetch(`${SHEETS_API}/${spreadsheetId}?fields=sheets.properties(sheetId,title,gridProperties(rowCount,columnCount,frozenRowCount))`, { method: 'GET' }),
     'read spreadsheet'
   )
   const data = (await res.json()) as {
-    sheets?: Array<{ properties: { sheetId: number; title: string; gridProperties?: { rowCount?: number; columnCount?: number } } }>
+    sheets?: Array<{ properties: { sheetId: number; title: string; gridProperties?: { rowCount?: number; columnCount?: number; frozenRowCount?: number } } }>
   }
   const out: Record<string, SheetGrid> = {}
   for (const s of data.sheets ?? []) {
@@ -438,6 +438,7 @@ export async function getSheetGrids(spreadsheetId: string): Promise<Record<strin
       sheetId: s.properties.sheetId,
       rowCount: s.properties.gridProperties?.rowCount ?? 0,
       columnCount: s.properties.gridProperties?.columnCount ?? 0,
+      frozenRowCount: s.properties.gridProperties?.frozenRowCount ?? 0,
     }
   }
   return out

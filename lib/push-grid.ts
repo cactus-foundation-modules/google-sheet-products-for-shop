@@ -10,7 +10,7 @@ import {
   type CellValue,
   type SheetCell,
 } from '@/modules/google-sheet-products-for-shop/lib/sheets'
-import { targetRows, targetColumns } from '@/modules/google-sheet-products-for-shop/lib/capacity'
+import { targetRows, targetColumns, type SheetGrid } from '@/modules/google-sheet-products-for-shop/lib/capacity'
 import {
   orderColumnsLikeSheet,
   orderRowsLikeSheet,
@@ -220,6 +220,36 @@ export function planTabPush(input: TabPushInput, oldGridIn: SheetCell[][]): TabP
 }
 
 /**
+ * How many blank rows a tab must GAIN before its stale rows can be deleted.
+ *
+ * Google will not let a deleteDimension take every non-frozen row of a sheet:
+ *
+ *   Invalid requests[0].deleteDimension: Sorry, it is not possible to delete all
+ *   non-frozen rows.
+ *
+ * Ordinarily nothing comes close - a tab keeps its header and most of its rows.
+ * But this module freezes the header row and trims every tab to exactly the rows
+ * it uses, so a tab holding a header and N data rows is N+1 rows tall with one
+ * frozen. Let all N products depart at once - a range re-coded so every variant
+ * SKU changed, a product rebuilt from scratch - and the delete asks for all N
+ * non-frozen rows. Google refuses, the whole atomic batch fails, and the Push
+ * stops with a message about frozen rows that has nothing to do with anything the
+ * owner did.
+ *
+ * The answer is to grow the tab by the shortfall first, in the same batch and
+ * ahead of the deletes, so a blank row is left standing where Google wants one.
+ * The appended rows sit BELOW every doomed index, so they shift nothing, and the
+ * resize pass that follows trims the tab back to its real content - meaning the
+ * padding never survives the push it was needed for.
+ */
+export function rowPadForDeletes(grid: { rowCount: number; frozenRowCount?: number }, doomedCount: number): number {
+  if (doomedCount === 0) return 0
+  const deletable = grid.rowCount - (grid.frozenRowCount ?? 0)
+  const shortfall = doomedCount - (deletable - 1)
+  return shortfall > 0 ? shortfall : 0
+}
+
+/**
  * Trim each pushed tab down to the grid it actually uses.
  *
  * Google counts a workbook's cells across every tab whether anything is in them
@@ -245,7 +275,7 @@ export function planTabPush(input: TabPushInput, oldGridIn: SheetCell[][]): TabP
 export function resizeRequests(
   plans: TabPushPlan[],
   oldGrids: Record<string, SheetCell[][]>,
-  grids: Record<string, { sheetId: number; rowCount: number; columnCount: number }>,
+  grids: Record<string, SheetGrid>,
 ): unknown[] {
   const requests: unknown[] = []
   for (const plan of plans) {
@@ -300,9 +330,15 @@ export async function pushGrids(spreadsheetId: string, inputs: TabPushInput[]): 
   const structural = plans.filter((p) => p.insert !== null || p.doomedRows.length > 0)
   const grids = await getSheetGrids(spreadsheetId)
   const requests: unknown[] = []
+  // Tabs padded to survive their own deletes (see rowPadForDeletes) are taller
+  // than getSheetGrids reported by the time the resize pass runs, so it works off
+  // this copy rather than the raw read - otherwise the padding row is counted as
+  // already-correct size and left behind.
+  const sizes: Record<string, SheetGrid> = { ...grids }
   for (const plan of structural) {
-    const sheetId = grids[plan.tab]?.sheetId
-    if (sheetId === undefined) continue
+    const grid = grids[plan.tab]
+    if (grid === undefined) continue
+    const sheetId = grid.sheetId
     if (plan.insert) {
       requests.push({
         insertDimension: {
@@ -311,11 +347,16 @@ export async function pushGrids(spreadsheetId: string, inputs: TabPushInput[]): 
         },
       })
     }
+    const pad = rowPadForDeletes(grid, plan.doomedRows.length)
+    if (pad > 0) {
+      requests.push({ appendDimension: { sheetId, dimension: 'ROWS', length: pad } })
+      sizes[plan.tab] = { ...grid, rowCount: grid.rowCount + pad }
+    }
     for (const range of toDescendingRowRanges(plan.doomedRows)) {
       requests.push({ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: range.start, endIndex: range.end } } })
     }
   }
-  requests.push(...resizeRequests(plans, oldGrids, grids))
+  requests.push(...resizeRequests(plans, oldGrids, sizes))
   await batchUpdate(spreadsheetId, requests)
 
   const active = plans.filter((p) => !p.skip)
