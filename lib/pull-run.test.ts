@@ -124,6 +124,7 @@ vi.mock('@/modules/shop/lib/import-engine', () => ({
 vi.mock('@/modules/shop/lib/db/import-jobs', () => ({
   getImportJobById: vi.fn(async () => ({ errors: [], createdCount: 0, updatedCount: 0, skippedCount: 0 })),
   updateImportJobProgress: vi.fn(async () => {}),
+  markImportJobCompleted: vi.fn(async () => {}),
 }))
 
 vi.mock('@/modules/shop-variations/lib/csv', () => ({

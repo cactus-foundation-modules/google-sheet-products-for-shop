@@ -1,5 +1,5 @@
 import { processImportJob } from '@/modules/shop/lib/import-engine'
-import { getImportJobById, updateImportJobProgress } from '@/modules/shop/lib/db/import-jobs'
+import { getImportJobById, markImportJobCompleted, updateImportJobProgress } from '@/modules/shop/lib/db/import-jobs'
 import { importVariationsCsv } from '@/modules/shop-variations/lib/csv'
 import { gridToImportCsv } from '@/modules/google-sheet-products-for-shop/lib/pull-products'
 import { applyProductFieldsPass } from '@/modules/google-sheet-products-for-shop/lib/product-fields-pass'
@@ -381,6 +381,11 @@ async function runPullStep(job: PullJob, adminEmail: string): Promise<void> {
         })
       }
       if (cursor >= dataRows.length) {
+        // A sheet with no product rows never reaches the engine, and the engine
+        // is what closes the shop's import job - so that job sat open for ever,
+        // and shop now reports an import still open after ten minutes as failed.
+        // Closed here instead, as the empty run it is.
+        if (dataRows.length === 0) await markImportJobCompleted(job.shopImportJobId, 'COMPLETED')
         // Leaving the phase clears the in-flight name: the deletions pass is bulk
         // statements with no row to announce, and a stale product name sitting
         // under "Removing items…" would read as if it were still being written.
