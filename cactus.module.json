@@ -1,9 +1,9 @@
 {
   "name": "google-sheet-products-for-shop",
-  "version": "0.1.74",
+  "version": "0.1.75",
   "tablePrefix": "gsp_",
   "description": "Mirrors your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.",
-  "requiresCoreVersion": "0.5.1758",
+  "requiresCoreVersion": "0.5.1763",
   "migrationCatchups": {
     "002_pull_job": "003_deletion_plan"
   },

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
+import { InfoTip } from '@/components/admin/InfoTip'
 
 type Settings = {
   hasOAuthClient: boolean
@@ -88,7 +89,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
 function StatusLine({ ok, label, value, warn }: { ok: boolean; label: string; value: string; warn?: boolean }) {
   const colour = warn ? 'var(--color-warning)' : ok ? 'var(--color-success)' : 'var(--color-text-muted)'
   return (
-    <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'baseline', padding: '0.3rem 0' }}>
+    <div className="settings-field" style={{ display: 'flex', gap: '0.6rem', alignItems: 'baseline' }}>
       <span aria-hidden style={{ width: '0.55rem', height: '0.55rem', borderRadius: '999px', background: colour, flexShrink: 0, alignSelf: 'center' }} />
       <span style={{ minWidth: '9rem' }}>{label}</span>
       <span style={{ ...muted, fontSize: '0.875rem' }}>{value}</span>
@@ -111,20 +112,21 @@ function ColumnToggle({
   disabled: boolean
   onChange: (value: boolean) => void
 }) {
+  const long = detail.length > 110
   return (
-    <label style={{ display: 'flex', gap: '0.6rem', alignItems: 'flex-start', cursor: disabled ? 'default' : 'pointer', marginBottom: '0.85rem' }}>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(e) => onChange(e.target.checked)}
-        style={{ marginTop: '0.2rem' }}
-      />
-      <span>
-        <span style={{ display: 'block', color: 'var(--color-text)' }}>{label}</span>
-        <span style={{ ...muted, fontSize: '0.8125rem' }}>{detail}</span>
-      </span>
-    </label>
+    <div>
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        {label}
+        {long && <InfoTip>{detail}</InfoTip>}
+      </label>
+      {!long && <span className="field-hint" style={{ display: 'block', marginLeft: '1.75rem' }}>{detail}</span>}
+    </div>
   )
 }
 
@@ -273,7 +275,7 @@ export function GoogleSheetSettingsTab() {
           three cards and a paragraph to work out whether the sync was actually
           set up, and there was nowhere at all that said something was running. */}
       <div className="card">
-        <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Where things stand</div>
+        <div className="card-title">Where things stand</div>
         <StatusLine
           ok={settings.hasOAuthConnected}
           label="Google account"
@@ -310,7 +312,7 @@ export function GoogleSheetSettingsTab() {
           Once it is connected the six-step Google walkthrough is just noise, so
           it folds away. It is still one click from here for a reconnect. */}
       <form onSubmit={saveClient} className="card">
-        <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Google account</div>
+        <div className="card-title">Google account</div>
         <details open={!settings.hasOAuthConnected} style={{ marginBottom: '0.75rem' }}>
           <summary style={{ cursor: 'pointer', fontSize: '0.875rem' }}>
             {settings.hasOAuthConnected ? 'Setting this up again, or on another site' : 'How to set this up'}
@@ -385,12 +387,7 @@ export function GoogleSheetSettingsTab() {
 
       {/* --- What goes in the sheet --- */}
       <div className="card">
-        <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>What goes in the sheet</div>
-        <p style={{ ...muted, fontSize: '0.875rem', marginBottom: '1rem' }}>
-          Two columns you can leave out, for when the sheet is going somewhere you would rather they didn&rsquo;t.
-          Leave a column out and it stops travelling in both directions: it disappears from the sheet on your next
-          Push, and a Pull leaves that figure exactly as it is on your website.
-        </p>
+        <div className="card-title">What goes in the sheet <InfoTip>Two columns you can leave out, for when the sheet is going somewhere you would rather they didn&rsquo;t. Leave a column out and it stops travelling in both directions: it disappears from the sheet on your next Push, and a Pull leaves that figure exactly as it is on your website. Switch one back on and the column returns on the next Push.</InfoTip></div>
 
         <ColumnToggle
           label="Stock count"
@@ -407,19 +404,12 @@ export function GoogleSheetSettingsTab() {
           onChange={(v) => saveColumn('includeTradePrice', v)}
         />
 
-        <p style={{ ...muted, fontSize: '0.8125rem', marginBottom: 0 }}>
-          Switch one back on and the column returns on the next Push, filled in from your website.
-        </p>
       </div>
 
       {/* --- The sheet --- */}
       <div className="card">
-        <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>The sheet</div>
+        <div className="card-title">The sheet <InfoTip>The sheet carries every price you keep, cost price included. Cost price is your supplier cost (your margin), so anyone you share the sheet with can see it - share it with that in mind.</InfoTip></div>
 
-        <p style={{ ...muted, fontSize: '0.8125rem', marginBottom: '1rem' }}>
-          The sheet carries every price you keep, cost price included. Cost price is your supplier cost (your
-          margin), so anyone you share the sheet with can see it - share it with that in mind.
-        </p>
 
         {!settings.hasOAuthConnected ? (
           <p style={muted}>Connect a Google account above first.</p>
