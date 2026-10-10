@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
 
 type Settings = {
   hasOAuthClient: boolean
@@ -157,8 +158,8 @@ export function GoogleSheetSettingsTab() {
     return () => { cancelled = true }
   }, [refresh])
 
-  async function saveClient(e: React.FormEvent) {
-    e.preventDefault()
+  async function saveClient(e?: React.FormEvent) {
+    e?.preventDefault()
     setSaving(true)
     setMessage(null)
     const res = await fetch(`${BASE}/settings`, {
@@ -266,6 +267,7 @@ export function GoogleSheetSettingsTab() {
 
       {message && <div className="card" style={{ marginBottom: '1rem' }}>{message}</div>}
 
+      <div className="settings-masonry">
       {/* --- Where things stand ---
           Four facts, in the order an owner needs them. It used to take reading
           three cards and a paragraph to work out whether the sync was actually
@@ -358,7 +360,15 @@ export function GoogleSheetSettingsTab() {
           <input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} autoComplete="off" />
         </div>
         <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
-          <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? 'Saving…' : 'Save credentials'}</button>
+          <SettingsHeaderActions>
+            <SettingsHeaderStatus
+              message={message && !/fail|could not/i.test(message) ? message : null}
+              error={message && /fail|could not/i.test(message) ? message : null}
+            />
+            <button type="button" className="btn btn-primary" disabled={saving || (!clientId && !clientSecret)} onClick={() => void saveClient()}>
+              {saving ? 'Saving…' : 'Save credentials'}
+            </button>
+          </SettingsHeaderActions>
           {settings.hasOAuthClient && (
             <button type="button" className="btn btn-secondary" onClick={connect}>
               {settings.hasOAuthConnected ? 'Reconnect Google' : 'Connect Google'}
@@ -429,6 +439,7 @@ export function GoogleSheetSettingsTab() {
             </p>
           </>
         )}
+      </div>
       </div>
     </div>
   )
