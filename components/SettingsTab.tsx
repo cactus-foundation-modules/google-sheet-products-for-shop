@@ -272,7 +272,7 @@ export function GoogleSheetSettingsTab() {
           Four facts, in the order an owner needs them. It used to take reading
           three cards and a paragraph to work out whether the sync was actually
           set up, and there was nowhere at all that said something was running. */}
-      <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="card">
         <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Where things stand</div>
         <StatusLine
           ok={settings.hasOAuthConnected}
@@ -309,7 +309,7 @@ export function GoogleSheetSettingsTab() {
       {/* --- Google connection ---
           Once it is connected the six-step Google walkthrough is just noise, so
           it folds away. It is still one click from here for a reconnect. */}
-      <form onSubmit={saveClient} className="card" style={{ marginBottom: '1.5rem' }}>
+      <form onSubmit={saveClient} className="card">
         <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>Google account</div>
         <details open={!settings.hasOAuthConnected} style={{ marginBottom: '0.75rem' }}>
           <summary style={{ cursor: 'pointer', fontSize: '0.875rem' }}>
@@ -384,7 +384,7 @@ export function GoogleSheetSettingsTab() {
       </form>
 
       {/* --- What goes in the sheet --- */}
-      <div className="card" style={{ marginBottom: '1.5rem' }}>
+      <div className="card">
         <div style={{ fontWeight: 600, marginBottom: '0.75rem' }}>What goes in the sheet</div>
         <p style={{ ...muted, fontSize: '0.875rem', marginBottom: '1rem' }}>
           Two columns you can leave out, for when the sheet is going somewhere you would rather they didn&rsquo;t.
