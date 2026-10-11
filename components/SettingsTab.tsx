@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { SettingsHeaderActions, SettingsHeaderStatus } from '@/components/admin/SettingsHeaderActions'
 import { InfoTip } from '@/components/admin/InfoTip'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 
 type Settings = {
   hasOAuthClient: boolean
@@ -131,6 +132,7 @@ function ColumnToggle({
 }
 
 export function GoogleSheetSettingsTab() {
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const [settings, setSettings] = useState<Settings>(EMPTY)
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
@@ -240,7 +242,7 @@ export function GoogleSheetSettingsTab() {
       setMessage('Something is running on the Products page right now. Let it finish (or stop it) before resetting the sheet.')
       return
     }
-    if (!window.confirm('Create a fresh, blank sheet? The current one stays in your Google Drive but is disconnected from Cactus. Push again to refill the new one.')) return
+    if (!(await askConfirm({ title: 'Create a fresh, blank sheet?', message: 'The current one stays in your Google Drive but is disconnected from Cactus. Push again to refill the new one.', confirmLabel: 'Create new sheet', danger: false }))) return
     setBusy('reset')
     setMessage(null)
     const res = await fetch(`${BASE}/reset`, { method: 'POST' })
@@ -261,6 +263,7 @@ export function GoogleSheetSettingsTab() {
 
   return (
     <div>
+      {confirmNode}
       <p style={{ ...muted, marginBottom: '1.5rem' }}>
         Mirror your shop catalogue into a Google Sheet you can bulk-edit, then pull the changes back in.
         This tab is the one-off setup; the day-to-day <strong>Push</strong>, <strong>Pull</strong> and sync log

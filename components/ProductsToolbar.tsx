@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   PullStatus, PushStatus, PreviewStatus, PullPreview, SyncRowError,
 } from '@/modules/google-sheet-products-for-shop/lib/types'
+import { useAdminConfirm } from '@/components/admin/useAdminConfirm'
 import { useSteppedJob, failureText } from '@/modules/google-sheet-products-for-shop/components/useSteppedJob'
 
 // The Google Sheet controls, injected onto shop's Products page through the
@@ -345,6 +346,7 @@ function PullModal({ resumable, onClose, onResumableChange }: {
   onClose: () => void
   onResumableChange: (s: PullStatus | null) => void
 }) {
+  const [askConfirm, confirmNode] = useAdminConfirm()
   // The check that works out what a Pull would do. Skipped entirely when we open
   // straight onto a job already part-way through.
   const check = useSteppedJob<PreviewStatus>({
@@ -480,7 +482,11 @@ function PullModal({ resumable, onClose, onResumableChange }: {
     return snapshot
   }, [pull, onResumableChange])
 
-  const STOP_PULL_CONFIRM = 'Stop this pull?\n\nEverything already updated stays as it is - the rest of your sheet just will not be applied. You can pull again whenever you like.'
+  const askStopPull = () => askConfirm({
+    title: 'Stop this pull?',
+    message: 'Everything already updated stays as it is - the rest of your sheet just will not be applied. You can pull again whenever you like.',
+    confirmLabel: 'Stop pull',
+  })
 
   // Closing the dialog while a job is unfinished STOPS that job, after the same
   // confirm as Stop. It used to just unmount the dialog and leave the job to be
@@ -490,11 +496,11 @@ function PullModal({ resumable, onClose, onResumableChange }: {
   //
   // A check is different: it writes nothing, so closing simply abandons it, with
   // nothing to warn about.
-  function requestClose() {
+  async function requestClose() {
     const s = pull.status
     const unfinished = s && !s.done && s.status !== 'CANCELLED'
     if (unfinished) {
-      if (!confirm(STOP_PULL_CONFIRM)) return
+      if (!(await askStopPull())) return
       void (async () => { await abandonPull(); onClose() })()
       return
     }
@@ -505,7 +511,7 @@ function PullModal({ resumable, onClose, onResumableChange }: {
   }
 
   async function stopPull() {
-    if (!confirm(STOP_PULL_CONFIRM)) return
+    if (!(await askStopPull())) return
     setStopping(true)
     const snapshot = await abandonPull()
     setStopping(false)
@@ -514,7 +520,9 @@ function PullModal({ resumable, onClose, onResumableChange }: {
 
   // ---- applying (a Pull job exists) ----
   if (pull.status) {
-    return <PullProgress
+    return <>
+      {confirmNode}
+      <PullProgress
       status={pull.status}
       working={pull.working}
       elapsedMs={pull.elapsedMs}
@@ -526,6 +534,7 @@ function PullModal({ resumable, onClose, onResumableChange }: {
       onClose={onClose}
       requestClose={requestClose}
     />
+    </>
   }
 
   // ---- checking ----
@@ -918,6 +927,7 @@ function PushModal({ resumable, onClose, onResumableChange }: {
   onClose: () => void
   onResumableChange: (s: PushStatus | null) => void
 }) {
+  const [askConfirm, confirmNode] = useAdminConfirm()
   const push = useSteppedJob<PushStatus>({
     endpoint: `${BASE}/push`,
     idKey: 'pushJobId',
@@ -944,7 +954,8 @@ function PushModal({ resumable, onClose, onResumableChange }: {
       const body = await res.json().catch(() => ({}))
       if (res.status === 409 && body.needsConfirm) {
         setStarting(false)
-        if (confirm(`${body.error}\n\nOverwrite the sheet anyway?`)) { force = true; setStarting(true); continue }
+        const overwrite = await askConfirm({ title: 'Overwrite the sheet anyway?', message: String(body.error ?? ''), confirmLabel: 'Overwrite' })
+        if (overwrite) { force = true; setStarting(true); continue }
         onClose()
         return
       }
@@ -966,7 +977,7 @@ function PushModal({ resumable, onClose, onResumableChange }: {
       await push.run(body.pushJobId)
       return
     }
-  }, [push, onClose])
+  }, [push, onClose, askConfirm])
 
   // On open: resume an unfinished push, or start a fresh one. Once per modal open.
   const began = useRef(false)
@@ -990,7 +1001,11 @@ function PushModal({ resumable, onClose, onResumableChange }: {
     return snapshot
   }, [push, onResumableChange])
 
-  const STOP_PUSH_CONFIRM = 'Stop this push?\n\nTabs already written stay as they are - the rest of the sheet just will not be updated. You can push again whenever you like.'
+  const askStopPush = () => askConfirm({
+    title: 'Stop this push?',
+    message: 'Tabs already written stay as they are - the rest of the sheet just will not be updated. You can push again whenever you like.',
+    confirmLabel: 'Stop push',
+  })
 
   async function continuePush() {
     const jobId = pushJobId.current ?? push.status?.pushJobId
@@ -1003,16 +1018,16 @@ function PushModal({ resumable, onClose, onResumableChange }: {
   // it to be resumed - a half-done push keeps spending Google's quota on every
   // Continue, and an owner who closed the window meant "stop". Closing the whole
   // browser tab still pauses; nothing client-side runs then.
-  function requestClose() {
+  async function requestClose() {
     const s = push.status
     const unfinished = s && !s.done && s.status !== 'CANCELLED'
     if (!unfinished) { onClose(); return }
-    if (!confirm(STOP_PUSH_CONFIRM)) return
+    if (!(await askStopPush())) return
     void (async () => { await abandonPush(); onClose() })()
   }
 
   async function stopPush() {
-    if (!confirm(STOP_PUSH_CONFIRM)) return
+    if (!(await askStopPush())) return
     setStopping(true)
     const snapshot = await abandonPush()
     setStopping(false)
@@ -1083,6 +1098,8 @@ function PushModal({ resumable, onClose, onResumableChange }: {
           {c.formulasKept ? ` ${n(c.formulasKept, 'formula')} kept.` : ''}
         </p>
       )}
+
+      {confirmNode}
 
       {(push.error || startErr) && (
         <p style={{ color: 'var(--color-danger)', fontSize: '0.8125rem', marginTop: '0.5rem' }}>{push.error ?? startErr}</p>
