@@ -4,6 +4,7 @@ import { getSessionFromCookie } from '@/lib/auth/session'
 import { hasPermission } from '@/lib/permissions/check'
 import { errorResponse } from '@/lib/utils'
 import { getSiteUrlOrNull } from '@/lib/config/env'
+import { isEncryptionKeyUsable } from '@/lib/crypto/secrets'
 import { getConnection, saveOAuthClient, saveColumnPreferences } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { buildGoogleRedirectUri } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
 import { getLatestUnfinishedPushJob } from '@/modules/google-sheet-products-for-shop/lib/push-job'
@@ -72,7 +73,7 @@ export async function PATCH(request: NextRequest) {
   if (data.oauthClientId && data.oauthClientSecret) {
     // Only the credentials need the key - a PATCH that just flips a column
     // checkbox stores nothing encrypted and must not be refused for want of one.
-    if (!process.env.ENCRYPTION_KEY) {
+    if (!isEncryptionKeyUsable()) {
       return errorResponse('ENCRYPTION_KEY is not set. Add it to your environment before connecting Google.', 503)
     }
     await saveOAuthClient(data.oauthClientId, data.oauthClientSecret)
