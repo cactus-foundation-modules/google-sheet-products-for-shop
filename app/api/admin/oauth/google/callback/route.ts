@@ -5,18 +5,19 @@ import { prisma } from '@/lib/db/prisma'
 import { getSiteUrlOrNull } from '@/lib/config/env'
 import { getOAuthClient, storeTokens } from '@/modules/google-sheet-products-for-shop/lib/db'
 import { buildGoogleRedirectUri, exchangeGoogleCode, fetchGoogleAccountEmail } from '@/modules/google-sheet-products-for-shop/lib/oauth-google'
+import { publicUrl } from '@/lib/security/public-origin'
 
 async function settingsRedirect(request: NextRequest, query: string): Promise<NextResponse> {
   const config = await prisma.siteConfig.findUnique({ where: { id: 'singleton' }, select: { adminPath: true } })
   const adminPath = config?.adminPath ?? ''
-  const res = NextResponse.redirect(new URL(`/${adminPath}/config?tab=google-sheet-products-for-shop&${query}`, request.url))
+  const res = NextResponse.redirect(publicUrl(request, `/${adminPath}/config?tab=google-sheet-products-for-shop&${query}`))
   res.cookies.delete('cactus_gsp_oauth_state')
   return res
 }
 
 export async function GET(request: NextRequest) {
   const user = await getSessionFromCookie()
-  if (!user) return NextResponse.redirect(new URL('/', request.url))
+  if (!user) return NextResponse.redirect(publicUrl(request, '/'))
   // Same gate as the start route. A bare session is not enough: the OAuth state
   // is a double-submit cookie the browser's owner controls, so without this a
   // low-privilege user could complete the flow with their own Google account and
